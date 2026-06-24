@@ -10,8 +10,10 @@ WORKDIR /app
 
 # Dependencias del sistema mínimas (fpdf2/pypdf/python-docx son puro Python,
 # pero gcc ayuda si alguna rueda necesita compilar en arm/musl).
+# curl: lo usa el healthcheck de Coolify dentro del contenedor (sin él, Coolify
+# marca el deploy como "unhealthy" y hace rollback aunque la app sí responda).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc \
+    && apt-get install -y --no-install-recommends gcc curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Instala dependencias primero (capa cacheable)
