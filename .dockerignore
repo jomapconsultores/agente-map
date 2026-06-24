@@ -1,0 +1,39 @@
+# Secretos — NUNCA dentro de la imagen
+.env
+.env.local
+.env.*.local
+.api_key_for_render
+
+# Git
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Salidas y temporales
+output/
+*.tmp.*
+
+# Pruebas / scripts locales no productivos
+test_supabase.py
+test_researcher_local.py
+smoke_save_session.py
+apply_migration.py
+
+# Documentación pesada / artefactos
+FLUJO_VISUAL.png
+MAPA_DEL_SISTEMA.docx
+DEPLOY.md
+
+# IDE / OS
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db
