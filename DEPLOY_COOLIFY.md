@@ -1,0 +1,90 @@
+# Deploy de agente_map en Coolify
+
+Despliega la API (`api/main.py`) como aplicación Docker en Coolify, usando el
+`Dockerfile` de la raíz. La base de datos **sigue en Supabase gestionado**
+(la app usa `supabase-py`, no SQL crudo, así que migrar la BD no aporta nada).
+
+Arquitectura: **Coolify = app · Supabase = datos**.
+
+## 0. Pre-requisitos
+- Instancia de Coolify funcionando (self-host o cloud).
+- Repo en GitHub: `https://github.com/jomapconsultores/agente-map` (rama `agente-map`).
+- Claves a mano (Anthropic, Mistral, Codestral, DeepSeek, Supabase) — ver `.env`.
+
+## 1. Crear el recurso
+1. En tu proyecto Coolify → **+ New Resource** → **Public/Private Repository**.
+2. Repo: `https://github.com/jomapconsultores/agente-map` · Rama: **`agente-map`**.
+   - Si es privado, conecta una GitHub App / Deploy Key en Coolify primero.
+3. **Build Pack: Dockerfile** (Coolify lo detecta al ver el `Dockerfile` en la raíz).
+4. **Port: 8000** (el contenedor expone 8000; el `CMD` respeta `$PORT`).
+5. **Health Check Path:** `/healthz` (la imagen ya trae HEALTHCHECK propio también).
+
+## 2. Variables de entorno
+Pega el bloque completo en *Environment Variables* (toma los valores de tu `.env`):
+
+```
+ANTHROPIC_API_KEY=...
+ANTHROPIC_MODEL=claude-sonnet-4-6
+SYSTEM_LANGUAGE=es
+
+MISTRAL_API_KEY=...
+CODESTRAL_API_KEY=...
+DEEPSEEK_API_KEY=...
+MISTRAL_MODEL=mistral-large-latest
+CODESTRAL_MODEL=codestral-latest
+DEEPSEEK_MODEL=deepseek-chat
+BUILDER_ROTATION=mistral,codestral,deepseek
+
+ROLE_RESEARCH=deepseek
+ROLE_REVIEW_RESEARCH=mistral
+ROLE_WRITER=deepseek
+ROLE_REVIEW_WRITER=mistral
+ROLE_FINANCIAL=codestral
+MAX_PIPELINE_RESTARTS=5
+PHASE_REVIEW_THRESHOLD=90
+
+SUPABASE_URL=https://rzdpfhflkzwylaaplgml.supabase.co
+SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+SUPABASE_SECRET_KEY=sb_secret_...
+SUPABASE_SERVICE_ROLE_JWT=eyJhbGciOi...
+
+AGENTE_MAP_API_KEY=<un_secreto_largo_y_random>
+```
+
+> `AGENTE_MAP_API_KEY` es la clave del **panel web** (no la de los modelos).
+> En Coolify la defines tú (a diferencia de Render que la autogeneraba).
+
+## 3. Dominio + HTTPS
+Asigna un dominio/subdominio en Coolify. Traefik gestiona HTTPS automático.
+La app lee el header `Host` + `x-forwarded-proto`, así que **la biometría
+(WebAuthn) funciona sin config extra**. Solo si diera problemas, agrega:
+
+```
+WEBAUTHN_RP_ID=tu-dominio.com
+WEBAUTHN_ORIGIN=https://tu-dominio.com
+```
+
+## 4. Base de datos (una sola vez)
+La BD ya existe en Supabase. Verifica/aplica las migraciones pendientes en el
+SQL Editor: https://supabase.com/dashboard/project/rzdpfhflkzwylaaplgml/sql/new
+(ver `db/006_webauthn.sql` y `db/008_captacion.sql` si faltan las tablas
+`webauthn_credentials`, `prospectos`, `clientes`).
+
+## 5. Deploy y verificación
+Pulsa **Deploy**. Cuando esté "Running":
+
+```bash
+curl https://TU-DOMINIO/healthz          # → {"ok": true, ...}
+curl -H "X-API-Key: TU_API_KEY" https://TU-DOMINIO/doc_types
+```
+
+Swagger en `https://TU-DOMINIO/docs`.
+
+## Notas operativas
+- **Tareas largas**: el pipeline corre in-process. Si Coolify reinicia el
+  contenedor durante un pipeline, ese trabajo queda en `running`. La UI lo
+  muestra como "inconcluso" y se puede reintentar.
+- **Persistencia**: no se necesita disco persistente; los .docx/.xlsx se
+  regeneran on-demand desde Supabase.
+- **Actualizar**: cada push a `agente-map` en GitHub puede disparar redeploy
+  (activa "Auto Deploy" en Coolify o usa el webhook que Coolify provee).
