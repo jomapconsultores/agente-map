@@ -49,20 +49,30 @@ SUPABASE_SECRET_KEY=sb_secret_...
 SUPABASE_SERVICE_ROLE_JWT=eyJhbGciOi...
 
 AGENTE_MAP_API_KEY=<un_secreto_largo_y_random>
+
+WEBAUTHN_RP_ID=proyectos.pensamiento-libre.org
+WEBAUTHN_ORIGIN=https://proyectos.pensamiento-libre.org
 ```
 
 > `AGENTE_MAP_API_KEY` es la clave del **panel web** (no la de los modelos).
 > En Coolify la defines tú (a diferencia de Render que la autogeneraba).
 
 ## 3. Dominio + HTTPS
-Asigna un dominio/subdominio en Coolify. Traefik gestiona HTTPS automático.
-La app lee el header `Host` + `x-forwarded-proto`, así que **la biometría
-(WebAuthn) funciona sin config extra**. Solo si diera problemas, agrega:
+El dominio público es **`proyectos.pensamiento-libre.org`**. Pasos:
 
-```
-WEBAUTHN_RP_ID=tu-dominio.com
-WEBAUTHN_ORIGIN=https://tu-dominio.com
-```
+1. **DNS**: crea un `CNAME` (o `A`) para `proyectos` apuntando a tu servidor
+   Coolify (mismo destino que el resto de subdominios de `pensamiento-libre.org`).
+2. **Coolify** → la app → **Domains**: pon `https://proyectos.pensamiento-libre.org`.
+   Traefik gestiona el certificado HTTPS automáticamente.
+
+La app fija el dominio vía las variables `WEBAUTHN_RP_ID` / `WEBAUTHN_ORIGIN`
+(ver bloque del paso 2), así la **biometría (WebAuthn) queda atada a este
+dominio** sin depender del header `Host`. Deben coincidir exactamente con el
+dominio configurado en Coolify y DNS.
+
+> ⚠️ Si cambias el dominio más adelante, las credenciales biométricas ya
+> registradas dejan de servir: cada usuario deberá **re-registrar** su
+> biometría en el nuevo dominio (el login con contraseña / API key no se afecta).
 
 ## 4. Base de datos (una sola vez)
 La BD ya existe en Supabase. Verifica/aplica las migraciones pendientes en el
