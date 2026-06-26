@@ -139,27 +139,32 @@ SUPABASE_PUBLISHABLE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY", "")
 SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY", "")
 SUPABASE_SERVICE_ROLE_JWT = os.getenv("SUPABASE_SERVICE_ROLE_JWT", "")
 
-MAX_TOKENS_ANALYST = 14000   # subido 8000→14000: análisis complejos no se truncan
-MAX_TOKENS_WRITER = 16000
-MAX_TOKENS_REVIEWER = 8000
+MAX_TOKENS_ANALYST = 16000   # 8000→14000→16000: análisis exhaustivos sin truncar
+MAX_TOKENS_WRITER = 16000    # límite de salida del redactor; subir solo si tu proveedor
+                             # (Mistral/Codestral/DeepSeek) admite más tokens de completion
+MAX_TOKENS_REVIEWER = 10000  # 8000→10000: revisiones más detalladas y accionables
 MAX_TOKENS_FINANCIAL = 8000
 
 # ── Pipeline ───────────────────────────────────────────────────────────────
 MAX_REVIEW_CYCLES = 5
 # Subciclos de consenso del equipo constructor (1°,2°,3°) antes de pasar a Claude.
 # En cada subciclo los 3 revisan; si hay faltantes, el redactor mejora y se revisa otra vez.
-MAX_PEER_SUBCYCLES = int(os.getenv("MAX_PEER_SUBCYCLES", "2"))
+MAX_PEER_SUBCYCLES = int(os.getenv("MAX_PEER_SUBCYCLES", "3"))
 # Verificación exigente: se requiere ≥90 en CADA elemento Y ≥90 global.
 APPROVAL_THRESHOLD = 90       # Score global mínimo para aprobar propuesta (0-100)
 ELEMENT_THRESHOLD = 90        # Score mínimo EXIGIDO en cada criterio individual (0-100)
 VIABILITY_THRESHOLD = 55      # Score mínimo de viabilidad para continuar (0-100)
 
 # ── Search ─────────────────────────────────────────────────────────────────
-SEARCH_MAX_RESULTS = 12       # resultados por query individual
+# Búsqueda muy exhaustiva por defecto: más queries, más páginas leídas y más
+# texto por página = más evidencia real para investigar a fondo. Todo paralelo,
+# así que el impacto en tiempo es moderado. Ajustable por entorno si se necesita
+# priorizar velocidad sobre profundidad.
+SEARCH_MAX_RESULTS = 15       # 12→15: resultados por query individual
 SEARCH_SAFE = "moderate"
-SEARCH_MAX_QUERIES = 14       # nº máximo de queries en una búsqueda profunda
-SEARCH_FETCH_PAGES = 10       # subido 6→10: con descarga paralela no penaliza tiempo
-SEARCH_FETCH_CHARS = 10000    # subido 6000→10000: lee requisitos completos del financiador
+SEARCH_MAX_QUERIES = 20       # 14→20: nº máximo de queries en una búsqueda profunda
+SEARCH_FETCH_PAGES = 14       # 10→14: páginas reales descargadas y leídas (descarga paralela)
+SEARCH_FETCH_CHARS = 14000    # 10000→14000: lee requisitos completos del financiador
 SEARCH_TIMEOUT = 12           # timeout (s) al descargar una página
 
 # ── Documentos de salida ─────────────────────────────────────────────────────

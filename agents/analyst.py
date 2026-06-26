@@ -41,16 +41,18 @@ SECTORES PRIORITARIOS PARA FINANCIAMIENTO:
 
 HERRAMIENTAS (úsalas con profundidad — nunca te conformes con titulares):
 - deep_search(queries=[...]): multi-query, descarga contenido real de las páginas más relevantes.
-  Es tu herramienta principal. Úsala con 8-12 queries variadas.
+  Es tu herramienta principal. Úsala con 12-16 queries variadas.
 - fetch_page(url): lee el texto completo de una URL. Para bases, criterios, fechas, montos.
 - web_search(query): búsqueda puntual para un dato específico.
 
-PROCESO DE BÚSQUEDA PROFUNDA (OBLIGATORIO al buscar oportunidades):
-1. deep_search con 8-12 queries variadas (español + inglés; financiadores explícitos)
-2. De los mejores resultados: abre con fetch_page las 3-4 convocatorias más prometedoras
+PROCESO DE BÚSQUEDA PROFUNDA (OBLIGATORIO al buscar oportunidades) — agótalo, no te quedes corto:
+1. deep_search con 12-16 queries variadas (español + inglés; financiadores explícitos)
+2. De los mejores resultados: abre con fetch_page las 5-6 convocatorias más prometedoras
 3. Lee bases reales: secciones, límite de páginas, presupuesto Excel, cofinanciamiento, fechas
 4. Confirma convocatoria ACTIVA y Ecuador ELEGIBLE
 5. Si una página no carga → reliefweb, devex, ungm, sitio oficial del financiador
+6. Si tras leer las bases quedan datos clave sin confirmar (montos, deadline, criterios),
+   lanza una segunda ronda de deep_search dirigida a esos huecos antes de concluir.
 
 LINEAMIENTOS A VERIFICAR:
 - NACIONALES: Constitución 2008, Plan Nacional vigente, COOTAD, LOEPS, ente rector del sector
@@ -84,11 +86,11 @@ El usuario quiere encontrar oportunidades de financiamiento no reembolsable para
 "{user_query}"
 
 PASO 1 — BÚSQUEDA PROFUNDA: llama a deep_search con un paquete amplio de queries.
-Puedes partir de estas y añadir las tuyas (idealmente 8-12 en total):
+Puedes partir de estas y añadir las tuyas (idealmente 12-16 en total):
 {queries_block}
 
-PASO 2 — LECTURA DE BASES: de los resultados, abre con fetch_page las 3-4 convocatorias
-más prometesoras y ACTIVAS (fecha límite futura) y lee sus requisitos formales reales
+PASO 2 — LECTURA DE BASES: de los resultados, abre con fetch_page las 5-6 convocatorias
+más prometedoras y ACTIVAS (fecha límite futura) y lee sus requisitos formales reales
 (secciones, páginas, formato, moneda, presupuesto en Excel/plantilla, cofinanciamiento,
 elegibilidad). Verifica que Ecuador sea elegible.
 

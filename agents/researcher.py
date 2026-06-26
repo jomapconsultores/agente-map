@@ -50,6 +50,13 @@ CONTEXTO ECUADOR:
 - Ecuador: ODS prioritarios 1, 2, 4, 6, 8, 13, 15 — firmó Agenda 2030
 - SENESCYT (cooperación técnica), MAATE (GEF/GCF), elegible para BID/CAF/BM/PNUD/casi toda bilateral
 
+EXHAUSTIVIDAD (NO NEGOCIABLE): exprimes hasta la última gota de la evidencia. Revisas TODA la
+evidencia entregada, no solo los primeros resultados; triangulas cada dato importante con más de
+una fuente cuando exista; extraes montos, fechas, criterios de elegibilidad, ponderaciones, costos
+elegibles, cofinanciamiento y requisitos de formato con precisión quirúrgica. El análisis, las
+recomendaciones al redactor y el desglose de viabilidad son densos en datos concretos y verificables,
+nunca generalidades. Agotas cada dimensión de viabilidad con su justificación específica.
+
 REGLAS DE RIGOR (NO NEGOCIABLES):
 1. Usa ÚNICAMENTE los datos de la evidencia entregada. No inventes URLs ni fechas.
 2. Cada dato concreto debe estar respaldado por una URL real presente en la evidencia.
@@ -225,7 +232,7 @@ def _gather_evidence(session: ProjectSession, seed: dict | None = None) -> str:
             evidence = execute_deep_search(queries, fetch_pages=SEARCH_FETCH_PAGES)
         except Exception as ex:
             evidence = json.dumps({"error": f"deep_search falló: {ex}"}, ensure_ascii=False)
-        pieces.append("=== EVIDENCIA DE BÚSQUEDA WEB (enfocada) ===\n" + _clip(evidence, 18000))
+        pieces.append("=== EVIDENCIA DE BÚSQUEDA WEB (enfocada) ===\n" + _clip(evidence, 24000))
         return "\n\n".join(pieces)
 
     # Búsqueda profunda: usa el paquete base de 35+ queries directamente.
@@ -238,7 +245,7 @@ def _gather_evidence(session: ProjectSession, seed: dict | None = None) -> str:
     except Exception as ex:  # la búsqueda nunca debe tumbar el pipeline
         evidence = json.dumps({"error": f"deep_search falló: {ex}", "queries": queries},
                               ensure_ascii=False)
-    pieces.append("=== EVIDENCIA DE BÚSQUEDA WEB (deep_search) ===\n" + _clip(evidence, 22000))
+    pieces.append("=== EVIDENCIA DE BÚSQUEDA WEB (deep_search) ===\n" + _clip(evidence, 28000))
 
     return "\n\n".join(pieces)
 
@@ -319,9 +326,11 @@ sus secciones obligatorias, su marco legal/normativo nacional e internacional, s
 y su formato preciso — y traducirlo en instrucciones que permiten producir un documento impecable
 al primer intento.
 
-Razonas de forma sistemática y sin lagunas: revisas la evidencia disponible, determinas el
+Razonas de forma sistemática y sin lagunas: revisas TODA la evidencia disponible, determinas el
 estándar real del tipo de documento y defines los criterios de éxito con una claridad que no
-deja margen a la interpretación ni al relleno.
+deja margen a la interpretación ni al relleno. Eres exhaustivo: las secciones, requisitos, normas
+y marcas de calidad que defines agotan lo que un entregable impecable de este tipo debe contener —
+no omites nada relevante y cada instrucción es concreta y accionable.
 
 NO inventes fuentes ni normas: usa SOLO la evidencia entregada. Si algo no está en la evidencia,
 indícalo como "a verificar" — nunca lo fabules. Respondes ÚNICAMENTE con el JSON pedido.
@@ -358,7 +367,7 @@ PLANTILLA/MODELO OPCIONAL A IMITAR:
 DOCUMENTOS DE APOYO:
 {support_join or "(ninguno)"}
 
-{_clip(evidence, 18000)}
+{_clip(evidence, 24000)}
 
 Con base en la evidencia anterior, responde ÚNICAMENTE con este JSON (sin texto extra):
 
