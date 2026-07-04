@@ -11,6 +11,7 @@ import sys
 import uuid
 from pathlib import Path
 
+import config
 from config import ANTHROPIC_API_KEY, MAX_REVIEW_CYCLES
 from models.schemas import ProjectSession
 from models.doc_types import DOC_TYPES, get_doc_type, list_doc_types
@@ -323,9 +324,17 @@ def run_pipeline(api_key: str):
         display.phase(f"FASE 3.{cycle} — CONTROL DE CALIDAD (Claude)", "🔬")
         display.info("Evaluando propuesta con máximo rigor...")
 
-        with display.spinner(f"Agente Revisor evaluando (ciclo {cycle})"):
+        # Para los tipos de máxima exigencia (tesis, artículo científico, peer
+        # review, TDR), core/pipeline.py (la ruta headless/API) ya usa consenso
+        # de 2 revisores independientes (reviewer.run_dual) en vez de un solo
+        # árbitro — main.py (CLI) hacía siempre reviewer.run() sin esa rama,
+        # dejando el consenso dual inalcanzable desde esta vía de entrada.
+        dual = bool(session.brief and session.brief.doc_type_key in config.SECOND_OPINION_DOC_TYPES)
+        with display.spinner(f"Agente Revisor evaluando (ciclo {cycle})" +
+                             (" — consenso de 2 revisores" if dual else "")):
             try:
-                review = reviewer.run(session, proposal, api_key)
+                review = reviewer.run_dual(session, proposal, api_key) if dual \
+                    else reviewer.run(session, proposal, api_key)
             except Exception as e:
                 display.error(f"Error en revisión: {e}")
                 break

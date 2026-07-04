@@ -298,11 +298,10 @@ def execute_deep_search(queries: list, fetch_pages: int = SEARCH_FETCH_PAGES) ->
     # Candidatos: alta señal primero, luego resto — pool 3× para compensar 403s.
     # Muchos sitios institucionales (undp.org, gob.ec) bloquean bots con 403;
     # descargamos un pool amplio en paralelo y nos quedamos con los n_fetch primeros
-    # que respondan con contenido real.
+    # que respondan con contenido real. El sort() de arriba ya deja `hits` en el
+    # orden correcto (alta señal primero) — un slice directo basta.
     pool_size = min(n_fetch * 3, len(hits))
-    hs_hits = [h for h in hits if h["high_signal"]]
-    other_hits = [h for h in hits if not h["high_signal"]]
-    pool = (hs_hits + other_hits)[:pool_size]
+    pool = hits[:pool_size]
 
     # ── Fase 2: descarga del pool en paralelo ─────────────────────────────────
     url_to_hit = {h["url"]: h for h in pool}
@@ -462,17 +461,3 @@ def opportunity_queries(topic: str) -> list:
     return deduped
 
 
-def linkedin_queries(topic: str) -> list:
-    """Pack específico de queries para LinkedIn. Útil cuando el agente quiere
-    cazar anuncios recientes de program officers o páginas de fundaciones."""
-    t = topic.strip()
-    return [
-        f"site:linkedin.com/posts {t} grant call proposals",
-        f"site:linkedin.com/posts convocatoria {t}",
-        f"site:linkedin.com/pulse {t} Ecuador funding",
-        f"site:linkedin.com/company {t} foundation grant",
-    ]
-
-
-# Compatibilidad retro
-OPPORTUNITY_QUERIES = opportunity_queries("desarrollo sostenible Ecuador")

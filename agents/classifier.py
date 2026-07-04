@@ -99,9 +99,15 @@ Responde ÚNICAMENTE con el JSON pedido, sin texto adicional.
 """
 
 
+_MAX_RESEARCH_TOOL_ROUNDS = 15
+
+
 def _run_research_loop(client: anthropic.Anthropic, prompt: str) -> str:
+    """Sin límite de rondas, un patrón de búsquedas repetitivas sin nunca emitir
+    texto final consumiría llamadas/tiempo indefinidamente hasta que el propio
+    límite de contexto de la API fallara — sin log ni salida controlada."""
     messages = [{"role": "user", "content": prompt}]
-    while True:
+    for round_idx in range(_MAX_RESEARCH_TOOL_ROUNDS):
         response = client.messages.create(
             model=MODEL, max_tokens=MAX_TOKENS_ANALYST, system=_BRIEF_SYSTEM,
             tools=ALL_TOOLS, messages=messages,
@@ -119,6 +125,21 @@ def _run_research_loop(client: anthropic.Anthropic, prompt: str) -> str:
             if hasattr(block, "text"):
                 return block.text
         return ""
+
+    # Se agotaron las rondas sin que el modelo emitiera texto final: fuerza una
+    # última respuesta sin herramientas disponibles en vez de colgarse indefinidamente.
+    messages.append({"role": "user", "content": [{
+        "type": "text",
+        "text": "Ya investigaste lo suficiente. Responde AHORA con el JSON final pedido, "
+                "basado en la evidencia recolectada hasta el momento — no uses más herramientas.",
+    }]})
+    response = client.messages.create(
+        model=MODEL, max_tokens=MAX_TOKENS_ANALYST, system=_BRIEF_SYSTEM, messages=messages,
+    )
+    for block in response.content:
+        if hasattr(block, "text"):
+            return block.text
+    return ""
 
 
 def _parse_json(raw: str) -> dict:
@@ -176,7 +197,8 @@ Luego responde ÚNICAMENTE con este JSON (sin texto extra):
   "international_guidelines": ["<norma internacional/organizacional/editorial 1>"],
   "key_requirements": ["<requisito indispensable 1>"],
   "quality_markers": ["<marca de excelencia/diferenciador 1>"],
-  "source_notes": "<fuentes y referencias reales encontradas, con datos verificables>"
+  "source_notes": "<fuentes y referencias reales encontradas, con datos verificables>",
+  "academic_level": "<SOLO si el tipo de documento es académico (p.ej. tesis): 'colegio'|'pregrado'|'maestria'|'doctorado'|'postdoctorado' según lo que indique la solicitud del usuario; si no aplica o no se puede determinar, usa 'pregrado'>"
 }}
 """
     from agents._client import make_client
@@ -185,6 +207,23 @@ Luego responde ÚNICAMENTE con este JSON (sin texto extra):
     data = _parse_json(raw)
 
     fmt = FormatSpec.from_dict({**default_fmt, **(data.get("format_spec") or {})})
+    academic_level = str(data.get("academic_level") or "").strip().lower()
+    evaluation_criteria = all_criteria(dt)
+
+    # Escala de exigencia por nivel académico real (hoy solo aplica a "tesis") —
+    # la misma lógica que researcher.build_brief(); antes esta ruta (usada por
+    # main.py/CLI) no la aplicaba, así que una "tesis doctoral" pedida por CLI
+    # no recibía el piso de exigencia de doctorado que sí recibía vía API.
+    if dt.key == "tesis" and academic_level:
+        from models.doc_types import level_requirements
+        lvl = level_requirements(academic_level)
+        fmt_dict = fmt.as_dict()
+        fmt_dict["min_words"] = max(int(fmt_dict.get("min_words") or 0), lvl["min_words"])
+        fmt = FormatSpec.from_dict(fmt_dict)
+        evaluation_criteria = evaluation_criteria + [
+            c for c in lvl["extra_criteria"] if c not in evaluation_criteria
+        ]
+
     return DocumentBrief(
         doc_type_key=dt.key,
         title=data.get("title", "Documento sin título"),
@@ -199,9 +238,10 @@ Luego responde ÚNICAMENTE con este JSON (sin texto extra):
         quality_markers=data.get("quality_markers", []),
         source_notes=data.get("source_notes", ""),
         needs_budget_excel=dt.needs_budget_excel,
-        evaluation_criteria=all_criteria(dt),
+        evaluation_criteria=evaluation_criteria,
         rigor_notes=dt.rigor_notes,
         raw=raw,
+        academic_level=academic_level or "pregrado",
     )
 
 

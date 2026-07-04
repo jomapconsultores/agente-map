@@ -93,38 +93,9 @@ def list_sessions(limit: int = 20, *, approved_only: bool = False,
     return rows
 
 
-_DOC_LABELS = {
-    "propuesta":          "Propuesta",
-    "articulo_cientifico":"Artículo científico",
-    "tesis":              "Tesis",
-    "tdr":                "TDR",
-    "informe":            "Informe",
-    "peer_review":        "Revisión de pares",
-    "legal_tecnico":      "Doc. legal/técnico",
-    "auto":               "Documento",
-}
-
-
 def _auto_title(row: dict, is_scouting: bool = False) -> str:
-    import datetime
-    created_raw = row.get("created_at")
-    try:
-        dt = datetime.datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
-        meses = ["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"]
-        fecha = f"{dt.day} {meses[dt.month-1]} {dt.year}"
-    except Exception:
-        fecha = str(created_raw or "")[:10]
-
-    key = (row.get("doc_type_key") or "auto").lower()
-    tipo = "Búsqueda de oportunidades" if is_scouting else _DOC_LABELS.get(key, key.replace("_", " ").title())
-
-    inp = (row.get("user_input") or "").strip().replace("\n", " ").replace("\r", "")
-    if inp:
-        if len(inp) > 55:
-            cut = inp[:55]; sp = cut.rfind(" ")
-            inp = (cut[:sp] if sp > 20 else cut) + "…"
-        return f"{tipo} — {inp} ({fecha})"
-    return f"{tipo} ({fecha})"
+    from utils.titles import auto_title
+    return auto_title(row, is_scouting)
 
 
 def get_session(session_id: str) -> Optional[dict[str, Any]]:

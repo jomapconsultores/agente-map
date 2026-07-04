@@ -234,51 +234,16 @@ def _project_session_from_db(row: dict) -> ProjectSession:
     return session
 
 
-_DOC_TYPE_LABELS: dict[str, str] = {
-    "propuesta":          "Propuesta",
-    "articulo_cientifico":"Artículo científico",
-    "tesis":              "Tesis",
-    "tdr":                "TDR",
-    "informe":            "Informe",
-    "peer_review":        "Revisión de pares",
-    "legal_tecnico":      "Doc. legal/técnico",
-    "auto":               "Documento",
-}
-
-
 def _auto_title(row: dict, is_scouting: bool = False) -> str:
-    """Genera un título descriptivo cuando el pipeline aún no tiene uno."""
-    import datetime
+    """Genera un título descriptivo cuando el pipeline aún no tiene uno.
 
-    created_raw = row.get("created_at")
-    try:
-        if created_raw:
-            dt = datetime.datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
-            fecha = dt.strftime("%-d %b %Y") if hasattr(dt, "strftime") else str(dt)[:10]
-        else:
-            fecha = datetime.date.today().strftime("%-d %b %Y")
-    except Exception:
-        fecha = str(created_raw or "")[:10]
-
-    # Tipo de documento
-    key = (row.get("doc_type_key") or "auto").lower()
-    if is_scouting:
-        tipo = "Búsqueda de oportunidades"
-    else:
-        tipo = _DOC_TYPE_LABELS.get(key, key.replace("_", " ").title())
-
-    # Extracto del input
-    inp = (row.get("user_input") or "").strip()
-    if inp:
-        # Tomar las primeras palabras hasta ~55 chars, cortar en espacio
-        if len(inp) > 55:
-            cut = inp[:55]
-            space = cut.rfind(" ")
-            inp = (cut[:space] if space > 20 else cut) + "…"
-        # Limpiar saltos de línea
-        inp = inp.replace("\n", " ").replace("\r", "")
-        return f"{tipo} — {inp} ({fecha})"
-    return f"{tipo} ({fecha})"
+    Compartida con db/queries.py vía utils/titles.py — antes cada módulo tenía
+    su propia copia, y la de aquí usaba `strftime("%-d %b %Y")`, que no es
+    portable a Windows (%-d es una extensión de glibc/macOS, no del CRT de
+    Windows) y ya divergía en formato de fecha frente a la copia de queries.py.
+    """
+    from utils.titles import auto_title
+    return auto_title(row, is_scouting)
 
 
 def _row_to_summary(row: dict) -> SessionSummary:
@@ -1444,9 +1409,11 @@ def buscar_mercado(req: BuscarMercadoRequest, background: BackgroundTasks,
                    p: Principal = Depends(get_principal)):
     """Lanza búsqueda de mercado en background. Devuelve job_id para polling."""
     import threading
+    _prune_captacion_jobs()
     job_id = str(uuid.uuid4())
     _captacion_jobs[job_id] = {"status": "running", "result": None, "error": None,
-                               "owner_user_id": p.user_id, "is_admin_job": p.is_admin}
+                               "owner_user_id": p.user_id, "is_admin_job": p.is_admin,
+                               "created_at": time.time()}
 
     def _run():
         try:
@@ -1473,6 +1440,17 @@ def buscar_mercado(req: BuscarMercadoRequest, background: BackgroundTasks,
 
 
 _captacion_jobs: dict[str, dict] = {}
+_CAPTACION_JOB_TTL_SEC = 3600  # 1h: tiempo de sobra para hacer polling del resultado
+
+
+def _prune_captacion_jobs() -> None:
+    """Sin esto, cada búsqueda de mercado (con docenas de prospectos de texto
+    largo) quedaba en memoria del proceso para siempre — igual al problema que
+    _wa_store ya resuelve para los challenges de WebAuthn, patrón reutilizado aquí."""
+    now = time.time()
+    for k in list(_captacion_jobs):
+        if now - _captacion_jobs[k].get("created_at", now) > _CAPTACION_JOB_TTL_SEC:
+            _captacion_jobs.pop(k, None)
 
 
 @app.get("/captacion/buscar/{job_id}")
@@ -1485,7 +1463,8 @@ def captacion_job_status(job_id: str, p: Principal = Depends(get_principal)):
     # podía leer los resultados de la búsqueda de mercado de otro usuario.
     if not p.is_admin and job.get("owner_user_id") != p.user_id:
         raise HTTPException(404, "Job no encontrado.")
-    return {k: v for k, v in job.items() if k not in ("owner_user_id", "is_admin_job")}
+    return {k: v for k, v in job.items()
+            if k not in ("owner_user_id", "is_admin_job", "created_at")}
 
 
 # ── Prospectos ────────────────────────────────────────────────────────────────

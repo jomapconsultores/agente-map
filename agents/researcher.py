@@ -28,7 +28,7 @@ from tools.search import (
     execute_deep_search, execute_fetch_page, opportunity_queries,
 )
 from config import (
-    MAX_TOKENS_ANALYST, SEARCH_FETCH_PAGES, VIABILITY_THRESHOLD,
+    MAX_TOKENS_ANALYST, SEARCH_FETCH_PAGES,
 )
 
 # ── System prompt para LLMs no-Claude ────────────────────────────────────────

@@ -82,6 +82,15 @@ EMPRESAS_DIR = BASE_DIR / "Empresas"
 # investigación (ver core/pipeline.py: research_approved), duplicar el límite
 # no duplica el costo real — solo se repiten redacción + gates, más baratos.
 MAX_PIPELINE_RESTARTS = int(os.getenv("MAX_PIPELINE_RESTARTS", "10"))
+# Techo de tiempo TOTAL por sesión, además del límite de intentos: con reintentos
+# largos de proveedor (hasta 600s de timeout + varios reintentos con backoff por
+# llamada) y hasta 10 ciclos, el peor caso teórico es de varias horas sin esto.
+# Combinado con un solo worker uvicorn compartiendo threadpool con /healthz
+# (Dockerfile: --workers 1), una sesión colgada mucho tiempo puede hacer que el
+# healthcheck falle y el hosting reinicie el contenedor, matando TODAS las
+# sesiones en curso. Si se supera, el pipeline corta y entrega la mejor versión
+# lograda como inconclusa — igual que al agotar MAX_PIPELINE_RESTARTS.
+MAX_PIPELINE_WALLCLOCK_SEC = int(os.getenv("MAX_PIPELINE_WALLCLOCK_SEC", "2700"))  # 45 min
 # Umbral mínimo (0-100) que debe alcanzar cada fase en su gate intermedio.
 PHASE_REVIEW_THRESHOLD = int(os.getenv("PHASE_REVIEW_THRESHOLD", "90"))
 

@@ -10,6 +10,7 @@ configurada. Lanza SupabaseSaveError si la conexión existe pero algo falla.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, fields, is_dataclass
 from typing import Any, Optional
 
@@ -274,6 +275,30 @@ def delete_session(session_id: str) -> bool:
         raise SupabaseSaveError(f"{type(e).__name__}: {e}") from e
 
 
+_MISSING_COLUMN_RE = re.compile(r"[Cc]ould not find the '(\w+)' column")
+
+
+def _upsert_session_tolerant(sb, row: dict, max_attempts: int = 5):
+    """Upsert de `row` en sessions; si Supabase/PostgREST rechaza por una columna
+    cuya migración aún no se aplicó ("Could not find the 'X' column ... in the
+    schema cache"), la quita del payload y reintenta — genérico para CUALQUIER
+    columna futura, no solo 'research_approved' (el primer caso real que rompió
+    la persistencia de TODAS las sesiones hasta que se detectó y se aplicó la
+    migración correspondiente)."""
+    attempt_row = dict(row)
+    last_err: Exception | None = None
+    for _ in range(max_attempts):
+        try:
+            return sb.table("sessions").upsert(attempt_row, on_conflict="session_id").execute()
+        except Exception as e:
+            m = _MISSING_COLUMN_RE.search(str(e))
+            if not m or m.group(1) not in attempt_row:
+                raise
+            del attempt_row[m.group(1)]
+            last_err = e
+    raise SupabaseSaveError(f"upsert sessions: demasiadas columnas ausentes tras reintentos: {last_err}")
+
+
 def save_session(session: ProjectSession) -> str | None:
     """Persiste la sesión completa en Supabase. Devuelve el uuid de la sesión.
 
@@ -288,18 +313,7 @@ def save_session(session: ProjectSession) -> str | None:
 
         # Upsert session
         row = _session_row(session)
-        try:
-            resp = sb.table("sessions").upsert(row, on_conflict="session_id").execute()
-        except Exception as e:
-            # db/009_resume_state.sql (columna research_approved) puede no estar
-            # aplicada todavía en este entorno. Sin este fallback, CUALQUIER sesión
-            # (no solo la reanudación) deja de persistirse por completo hasta que
-            # se aplique la migración — degradamos en vez de romper todo el guardado.
-            if "research_approved" in str(e) and "research_approved" in row:
-                row = {k: v for k, v in row.items() if k != "research_approved"}
-                resp = sb.table("sessions").upsert(row, on_conflict="session_id").execute()
-            else:
-                raise
+        resp = _upsert_session_tolerant(sb, row)
         if not resp.data:
             raise SupabaseSaveError("upsert sessions devolvió data vacía")
         session_uuid = resp.data[0]["id"]

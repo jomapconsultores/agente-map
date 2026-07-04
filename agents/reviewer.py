@@ -125,6 +125,7 @@ TÍTULO: {brief.title}
 IDIOMA REQUERIDO: {brief.language}
 CICLO: {cycle}
 UMBRAL: ≥{threshold} global Y ≥{threshold} en CADA criterio.
+{f"NIVEL ACADÉMICO A EXIGIR: {brief.academic_level} — calibra tu exigencia a ESTE nivel exacto (los criterios de originalidad/rigor adicionales ya están listados abajo, pero el nivel te da el ancla de calibración explícita)." if getattr(brief, 'academic_level', '') and brief.doc_type_key == 'tesis' else ""}
 
 FORMATO EXIGIDO: {fmt.to_prompt()}
 MEDICIÓN AUTOMÁTICA DE EXTENSIÓN (ya calculada, tómala como dato duro): {stats_str}

@@ -27,6 +27,7 @@ flujo interactivo propio.
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from typing import Optional
 
@@ -213,6 +214,10 @@ def run_scouting(
         doc_type_key="propuesta", owner_user_id=owner_user_id,
     )
     _mark_running(session_id, owner_user_id)
+    # Simetría con run_pipeline: si un usuario pausó una sesión de scouting
+    # mientras estaba "running" (el endpoint /pause lo permite), el flag queda
+    # escrito para siempre porque run_scouting nunca lo consulta ni lo limpia.
+    repository.clear_pause_requested(session_id)
     _log(session_id, "scout_start", "Iniciando búsqueda de oportunidades", "🔍", "running",
          "Investigando convocatorias activas con financiamiento no reembolsable")
     try:
@@ -292,6 +297,7 @@ def run_pipeline(
 
     # ── Reanudación tras pausa: reutiliza investigación/redacción ya aprobadas ──
     resumed_state = None
+    resume_cycle_offset = 0
     try:
         resumed_state = repository.load_resumable_state(session_id)
     except Exception:
@@ -304,6 +310,10 @@ def run_pipeline(
         if session.proposal_versions:
             session.final_proposal = session.proposal_versions[-1]
         session.research_approved = True
+        # Continúa la numeración de ciclos donde se había pausado, en vez de
+        # reiniciar en 1 (antes load_resumable_state calculaba current_cycle sin
+        # que nada lo consumiera).
+        resume_cycle_offset = int(resumed_state.get("current_cycle") or 0)
         _log(session_id, "resume", "Reanudando sesión pausada", "▶",
              "done", "Se reutiliza la investigación ya aprobada — no se repite la búsqueda web")
 
@@ -330,11 +340,19 @@ def run_pipeline(
         # deben repetirla: es la fase más cara (búsqueda web + varias llamadas LLM).
         # Si se está reanudando una sesión pausada, ya viene en True (ver arriba).
         research_approved = session.research_approved
+        pipeline_start = time.monotonic()
 
         for attempt in range(1, MAX_PIPELINE_RESTARTS + 1):
             session.attempts = attempt
-            session.current_cycle = attempt
-            cycle_label = f" (ciclo {attempt})" if attempt > 1 else ""
+            session.current_cycle = resume_cycle_offset + attempt
+            cycle_label = f" (ciclo {session.current_cycle})" if session.current_cycle > 1 else ""
+
+            elapsed = time.monotonic() - pipeline_start
+            if elapsed > config.MAX_PIPELINE_WALLCLOCK_SEC:
+                _log(session_id, "timeout",
+                     f"Techo de tiempo alcanzado ({elapsed/60:.0f} min) — se entrega la mejor versión",
+                     "⏱️", "warning", f"Límite: {config.MAX_PIPELINE_WALLCLOCK_SEC/60:.0f} min")
+                break  # sale del for y entrega la mejor versión lograda, igual que al agotar intentos
 
             if _pause_if_requested(session_id, session, research_approved):
                 return session
