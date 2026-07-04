@@ -341,7 +341,7 @@ def _owned_row(session_id: str, p: Principal) -> dict:
 STATIC_DIR = Path(__file__).parent / "static"
 
 # ── WebAuthn helpers ─────────────────────────────────────────────────────────
-# In-memory challenge store (single-instance; works on Render free tier).
+# In-memory challenge store (single-instance).
 _wa_challenges: dict[str, tuple[bytes, float]] = {}
 
 

@@ -108,7 +108,7 @@ bullet("encuentra/analiza la oportunidad de financiamiento e investiga en la web
 bullet("redactan y mejoran el documento por turnos rotando entre ellos,", "Tres agentes \"constructores\" (Mistral, Codestral, DeepSeek) ")
 bullet("revisan entre sí hasta coincidir en que todo está cumplido,", "Los mismos tres constructores ")
 bullet("da el veredicto final y exige ≥90 puntos en cada criterio y ≥90 global.", "Un agente \"revisor\" (Claude) ")
-para("Está preparado para subir a la nube (Render) con base de datos (Supabase), login con "
+para("Está preparado para subir a la nube (Coolify) con base de datos (Supabase), login con "
      "huella/Face ID y aprobación de usuarios por un administrador.")
 
 p = doc.add_paragraph()
@@ -258,7 +258,7 @@ for t in [
     "Rotación y respaldo entre proveedores de IA para resistir caídas.",
     "Búsqueda web profunda sin costo (DuckDuckGo) con lectura real de bases de convocatorias.",
     "Generación de Word y Excel con formato y cálculos vivos.",
-    "Configuración de despliegue en Render (render.yaml) y guía DEPLOY.md.",
+    "Configuración de despliegue en Coolify y guía DEPLOY_COOLIFY.md.",
 ]:
     bullet(t)
 
@@ -266,10 +266,8 @@ h2("Pendiente / a verificar antes de operar")
 for t in [
     "Cargar las claves de API en el servidor: ANTHROPIC_API_KEY y, opcionalmente, MISTRAL/CODESTRAL/DEEPSEEK.",
     "Crear el proyecto en Supabase y aplicar las migraciones SQL (incluida 004 de usuarios/propiedad).",
-    "Confirmar las claves de Supabase (URL, publishable, secret, service-role) en el entorno de Render.",
+    "Confirmar las claves de Supabase (URL, publishable, secret, service-role) en el entorno de Coolify.",
     "Definir el primer usuario administrador (el primer registro queda como admin aprobado).",
-    "Plan Free de Render: el servicio \"se duerme\" tras 15 min sin uso y un pipeline largo podría cortarse "
-    "si Render reinicia el proceso. Para producción seria conviene el plan Starter (US$7/mes) o un worker dedicado.",
     "Sin las claves de Mistral/Codestral/DeepSeek, los constructores caen en Claude como respaldo: "
     "funciona, pero sube el costo (todo lo haría Claude).",
 ]:
@@ -363,7 +361,7 @@ h2("7.3 Costos fijos de infraestructura (mensual)")
 tabla(
     ["Servicio", "Plan gratis", "Plan recomendado producción"],
     [
-        ["Render (servidor web)", "US$0 (Free, se duerme)", "US$7/mes (Starter, siempre activo)"],
+        ["Coolify (servidor web, VPS propio)", "US$0 (VPS ya existente)", "US$5-10/mes (VPS dedicado)"],
         ["Supabase (base de datos)", "US$0 (Free, 500 MB)", "US$25/mes (Pro) si crece el uso"],
         ["Búsqueda (DuckDuckGo)", "US$0", "US$0"],
         ["Dominio propio (opcional)", "—", "~US$1/mes (~US$12/año)"],
@@ -403,12 +401,12 @@ h2("Cómo controlar el gasto")
 bullet("Mantén ANTHROPIC_MODEL en claude-sonnet-4-6 (no Opus) salvo casos premium.")
 bullet("Configura las claves de Mistral/Codestral/DeepSeek para que la redacción NO la pague Claude.")
 bullet("Considera bajar MAX_REVIEW_CYCLES (hoy 5) a 3 si los costos suben de más.")
-bullet("Empieza en planes gratuitos (Render Free + Supabase Free) para validar; sube a Starter cuando haya uso real.")
+bullet("Empieza en planes gratuitos (Supabase Free) para validar; sube de plan cuando haya uso real.")
 bullet("Fija un tope mensual de gasto en la consola de Anthropic para evitar sorpresas.")
 bullet("Lleva control por usuario (ya hay propiedad de entregables) para saber quién consume más.")
 
 h2("Riesgos técnicos a vigilar")
-bullet("Plan Free de Render: si el proceso se reinicia durante un pipeline largo, ese trabajo puede quedar en \"en proceso\".")
+bullet("Si el servidor se reinicia durante un pipeline largo, ese trabajo puede quedar en \"en proceso\".")
 bullet("Dependes de servicios externos (Anthropic, Mistral, DeepSeek, DuckDuckGo): caídas o cambios de precio te afectan.")
 bullet("Verifica límites de tasa (rate limits) si procesas muchas propuestas en paralelo.")
 
