@@ -76,6 +76,12 @@ class DocType:
     is_proposal: bool = False       # usa la ruta Analista (viabilidad/financiador)
     rigor_notes: str = ""           # exigencias de máximo nivel para el redactor
     module: str = "proyectos"       # módulo principal: "investigacion" | "proyectos" | "ambos"
+    # Umbral de aprobación propio (global y por criterio), más estricto que el
+    # genérico APPROVAL_THRESHOLD/ELEMENT_THRESHOLD (90). None = usa el genérico.
+    # Un TDR rutinario y una tesis doctoral no deberían aprobarse con la misma
+    # exigencia — los tipos de mayor riesgo reputacional (académicos, legales)
+    # la tienen más alta.
+    strict_threshold: Optional[int] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -115,7 +121,8 @@ DOC_TYPES: dict = {
             "Capacidad Institucional y Equipo",
         ],
         format=FormatSpec(font_name="Calibri", font_size=11, line_spacing=1.15,
-                          citation_style="APA 7", notes="Tablas de marco lógico y presupuesto incluidas."),
+                          citation_style="APA 7", min_words=2500,
+                          notes="Tablas de marco lógico y presupuesto incluidas."),
         needs_budget_excel=True,
         is_proposal=True,
         rigor_notes="Propuesta lista para ganar una convocatoria real; cada objetivo con indicadores SMART.",
@@ -141,12 +148,16 @@ DOC_TYPES: dict = {
             "Solidez de la argumentación y discusión",
             "Calidad y actualidad de las referencias (citas verificables)",
             "Claridad, estilo académico y coherencia (IMRyD)",
+            "Potencia estadística y tamaño de muestra reportados (si aplica diseño cuantitativo)",
+            "Novedad frente a la literatura de los últimos 3-5 años",
+            "Declaración de disponibilidad de datos y conflictos de interés",
         ],
         format=FormatSpec(font_name="Times New Roman", font_size=12, line_spacing=2.0,
-                          citation_style="APA 7", max_words=8000,
+                          citation_style="APA 7", min_words=3000, max_words=8000,
                           notes="Abstract ≤250 palabras; figuras y tablas numeradas y citadas en el texto."),
         rigor_notes="Máximo rigor científico: hipótesis falsables, métodos replicables, citas reales y verificables. "
                     "Nunca inventar resultados ni referencias; señalar supuestos y limitaciones.",
+        strict_threshold=94,
     ),
 
     "tdr": DocType(
@@ -175,10 +186,12 @@ DOC_TYPES: dict = {
             "Objetividad y legalidad de los criterios de evaluación de ofertas",
         ],
         format=FormatSpec(font_name="Arial", font_size=11, line_spacing=1.5,
-                          citation_style="", notes="Lenguaje jurídico-técnico, numeración de cláusulas, referencias legales exactas."),
+                          citation_style="", min_words=1500,
+                          notes="Lenguaje jurídico-técnico, numeración de cláusulas, referencias legales exactas."),
         needs_budget_excel=True,
         rigor_notes="Documento legalmente blindado: citar artículos exactos de la normativa; "
                     "especificaciones no direccionadas; criterios de evaluación objetivos y medibles.",
+        strict_threshold=92,
     ),
 
     "peer_review": DocType(
@@ -204,9 +217,11 @@ DOC_TYPES: dict = {
             "Objetividad y tono profesional",
         ],
         format=FormatSpec(font_name="Times New Roman", font_size=11, line_spacing=1.5,
+                          min_words=500,
                           notes="Comentarios numerados con referencia a página/línea del manuscrito."),
         rigor_notes="Revisión imparcial y reproducible: cada juicio anclado en el texto evaluado y en la rúbrica. "
                     "Si no se entrega rúbrica, usar criterios estándar del área y declararlo.",
+        strict_threshold=92,
     ),
 
     "tesis": DocType(
@@ -236,9 +251,13 @@ DOC_TYPES: dict = {
         ],
         format=FormatSpec(font_name="Times New Roman", font_size=12, line_spacing=1.5,
                           margin_left_cm=3.0, margin_right_cm=2.5, citation_style="APA 7",
-                          notes="Estructura y exigencia ajustadas al nivel (colegio, grado, maestría, doctorado, postdoctorado)."),
+                          min_words=8000,
+                          notes="Estructura y exigencia ajustadas al nivel (colegio, grado, maestría, doctorado, postdoctorado). "
+                                "min_words es un piso conservador para el nivel más bajo (colegio); niveles superiores "
+                                "exigen bastante más extensión en la práctica, según rigor_notes."),
         rigor_notes="Nivel académico al máximo según el grado: a mayor nivel, mayor originalidad, profundidad teórica "
                     "y sofisticación metodológica. Citas reales y verificables; nunca inventar fuentes.",
+        strict_threshold=93,
     ),
 
     "legal_tecnico": DocType(
@@ -262,6 +281,7 @@ DOC_TYPES: dict = {
             "Coherencia y trazabilidad de las conclusiones/recomendaciones",
         ],
         format=FormatSpec(font_name="Arial", font_size=11, line_spacing=1.5,
+                          min_words=600,
                           notes="Estilo formal-institucional; numeración y referencias normativas exactas."),
         rigor_notes="Precisión absoluta en datos, fechas y referencias legales; tono institucional y profesional.",
     ),
@@ -286,6 +306,36 @@ DOC_TYPES: dict = {
 }
 
 DEFAULT_DOC_TYPE = "generico"
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ESCALA POR NIVEL ACADÉMICO (hoy usada por doc_type_key="tesis")
+# ─────────────────────────────────────────────────────────────────────────────
+# Un trabajo de colegio y una tesis doctoral usaban el mismo min_words y los
+# mismos evaluation_criteria pese a que la exigencia real debe escalar con el
+# nivel. Esta tabla ajusta el piso de extensión y añade criterios de evaluación
+# adicionales según el nivel académico real detectado en el brief.
+LEVEL_REQUIREMENTS: dict = {
+    "colegio":       {"min_words": 3000,  "extra_criteria": []},
+    "pregrado":      {"min_words": 8000,  "extra_criteria": []},
+    "maestria":      {"min_words": 15000, "extra_criteria": [
+        "Aporte original demostrable frente al estado del arte",
+    ]},
+    "doctorado":     {"min_words": 25000, "extra_criteria": [
+        "Aporte original demostrable frente al estado del arte",
+        "Rigor metodológico con potencia estadística/analítica reportada",
+    ]},
+    "postdoctorado": {"min_words": 25000, "extra_criteria": [
+        "Aporte original demostrable frente al estado del arte",
+        "Rigor metodológico con potencia estadística/analítica reportada",
+        "Contribución teórica/metodológica de frontera en el área",
+    ]},
+}
+
+
+def level_requirements(academic_level: str) -> dict:
+    """Devuelve {min_words, extra_criteria} para el nivel dado (default: pregrado)."""
+    return LEVEL_REQUIREMENTS.get((academic_level or "").strip().lower(),
+                                  LEVEL_REQUIREMENTS["pregrado"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────

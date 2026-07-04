@@ -10,11 +10,14 @@ configurada. Lanza SupabaseSaveError si la conexión existe pero algo falla.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
-from typing import Any
+from dataclasses import asdict, fields, is_dataclass
+from typing import Any, Optional
 
 import config
-from models.schemas import ProjectSession
+from models.schemas import (
+    AnalysisResult, DocumentBrief, EcuadorAlignment, FinancialPackage,
+    FunderInfo, ProjectSession,
+)
 from utils.supabase_client import get_client
 
 
@@ -57,6 +60,7 @@ def _session_row(s: ProjectSession) -> dict:
         "analysis":      _dump(s.analysis),
         "brief":         _dump(s.brief),
         "financial":     _dump(s.financial),
+        "research_approved": bool(s.research_approved),
     }
 
 
@@ -144,6 +148,92 @@ def request_pause(session_id: str) -> bool:
         raise SupabaseSaveError(f"{type(e).__name__}: {e}") from e
 
 
+def clear_pause_requested(session_id: str) -> None:
+    """Limpia el flag de pausa al arrancar/reanudar un pipeline.
+
+    Sin esto, una sesión pausada una vez queda con pause_requested=True para
+    siempre (no existía ningún lugar que lo reseteara), así que "Continuar"
+    se pausaba de inmediato otra vez en el primer checkpoint."""
+    if not is_enabled():
+        return
+    try:
+        sb = get_client(service_role=True)
+        sb.table("sessions").update({"pause_requested": False}).eq(
+            "session_id", session_id).execute()
+    except Exception:
+        pass  # best-effort, igual que el resto del control de progreso
+
+
+def _dc_from_dict(cls, data: dict):
+    """Reconstruye un dataclass desde un dict, ignorando claves desconocidas
+    (tolera drift entre lo persistido y los campos actuales del dataclass)."""
+    if not data:
+        return None
+    valid = {f.name for f in fields(cls)}
+    return cls(**{k: v for k, v in data.items() if k in valid})
+
+
+def _analysis_from_dict(data: Optional[dict]) -> Optional[AnalysisResult]:
+    if not data:
+        return None
+    data = dict(data)
+    if data.get("funder"):
+        data["funder"] = _dc_from_dict(FunderInfo, data["funder"])
+    if data.get("ecuador_alignment"):
+        data["ecuador_alignment"] = _dc_from_dict(EcuadorAlignment, data["ecuador_alignment"])
+    try:
+        return _dc_from_dict(AnalysisResult, data)
+    except TypeError:
+        return None  # esquema persistido incompatible: no reutilizable, se reinvestiga
+
+
+def load_resumable_state(session_id: str) -> Optional[dict]:
+    """Lee el estado persistido de una sesión para reanudarla tras una pausa.
+
+    Devuelve None si Supabase está apagado, la sesión no existe, o no había
+    investigación aprobada guardada (nada seguro que reutilizar — el pipeline
+    reinvestigará desde cero, que es el comportamiento actual). Si existe,
+    devuelve analysis/brief/financial/proposal_versions/current_cycle listos
+    para poblar un ProjectSession nuevo sin repetir Fase 1/Gate 1.
+    """
+    if not is_enabled():
+        return None
+    try:
+        sb = get_client(service_role=True)
+        row = sb.table("sessions").select(
+            "id, analysis, brief, financial, current_cycle, research_approved"
+        ).eq("session_id", session_id).limit(1).execute()
+        if not row.data:
+            return None
+        data = row.data[0]
+        # Solo es seguro saltar Fase 1 si Gate 1 ya había aprobado esta investigación.
+        if not data.get("research_approved") or not data.get("analysis") or not data.get("brief"):
+            return None
+
+        analysis = _analysis_from_dict(data.get("analysis"))
+        brief = _dc_from_dict(DocumentBrief, data.get("brief")) if data.get("brief") else None
+        if not analysis or not brief:
+            return None
+        financial = (_dc_from_dict(FinancialPackage, data["financial"])
+                     if data.get("financial") else None)
+
+        proposals_resp = (
+            sb.table("proposal_versions").select("cycle, content")
+            .eq("session_id", data["id"]).order("cycle").execute()
+        )
+        proposal_versions = [r["content"] for r in (proposals_resp.data or []) if r.get("content")]
+
+        return {
+            "analysis": analysis,
+            "brief": brief,
+            "financial": financial,
+            "proposal_versions": proposal_versions,
+            "current_cycle": int(data.get("current_cycle") or 0),
+        }
+    except Exception:
+        return None  # reanudar es best-effort: si falla, el pipeline arranca de cero
+
+
 def cancel_session(session_id: str) -> bool:
     """Cancela un trabajo (lo marca como fallido/cancelado, conservando el registro).
     Devuelve True si existía. Idempotente si Supabase está apagado."""
@@ -198,11 +288,18 @@ def save_session(session: ProjectSession) -> str | None:
 
         # Upsert session
         row = _session_row(session)
-        resp = (
-            sb.table("sessions")
-            .upsert(row, on_conflict="session_id")
-            .execute()
-        )
+        try:
+            resp = sb.table("sessions").upsert(row, on_conflict="session_id").execute()
+        except Exception as e:
+            # db/009_resume_state.sql (columna research_approved) puede no estar
+            # aplicada todavía en este entorno. Sin este fallback, CUALQUIER sesión
+            # (no solo la reanudación) deja de persistirse por completo hasta que
+            # se aplique la migración — degradamos en vez de romper todo el guardado.
+            if "research_approved" in str(e) and "research_approved" in row:
+                row = {k: v for k, v in row.items() if k != "research_approved"}
+                resp = sb.table("sessions").upsert(row, on_conflict="session_id").execute()
+            else:
+                raise
         if not resp.data:
             raise SupabaseSaveError("upsert sessions devolvió data vacía")
         session_uuid = resp.data[0]["id"]

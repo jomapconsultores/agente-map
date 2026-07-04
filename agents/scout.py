@@ -207,11 +207,30 @@ def run(session: ProjectSession, api_key: str | None = None) -> list[dict]:
     )
     data = _parse(raw)
 
+    from datetime import date as _date
+    from utils.deadline_checker import parse_deadline_text
+
     opps = data.get("opportunities") or []
     cleaned: list[dict] = []
     for o in opps:
         if not isinstance(o, dict) or not (o.get("funder") or {}).get("name"):
             continue
+        funder = o.get("funder") or {}
+
+        # Verificación DETERMINISTA de deadline: el weighted_score depende de
+        # números que el propio LLM se autoasigna en feasibility_breakdown, sin
+        # ningún chequeo en código de que la fecha no esté ya vencida. Una
+        # convocatoria con deadline pasado nunca debe poder colarse como viable
+        # solo porque el modelo la calificó alto.
+        dl_date = parse_deadline_text(funder.get("deadline") or "")
+        if dl_date and dl_date < _date.today():
+            fb = dict(o.get("feasibility_breakdown") or {})
+            fb["deadline_feasibility"] = {
+                "score": 0,
+                "reason": f"Deadline ya vencido ({dl_date.isoformat()}): no es una oportunidad viable.",
+            }
+            o["feasibility_breakdown"] = fb
+
         o["weighted_score"] = config.weighted_score(
             o.get("feasibility_breakdown", {}), o.get("winning_probability", 0),
         )
@@ -223,6 +242,90 @@ def run(session: ProjectSession, api_key: str | None = None) -> list[dict]:
     # Ranking descendente y recorte al top-N
     cleaned.sort(key=lambda x: x.get("weighted_score", 0), reverse=True)
     cleaned = cleaned[:SCOUT_TOP_N]
+
+    # A partir de aquí ya son pocos candidatos (SCOUT_TOP_N): vale la pena el costo
+    # de red de la verificación FEHACIENTE completa (la misma que ya usa
+    # core/pipeline.py para el flujo de análisis único), en vez de confiar solo en
+    # lo que el LLM constructor afirmó sobre sus propias fuentes y fechas.
+    for o in cleaned:
+        try:
+            from utils.url_verifier import enrich_evidence_sources
+            if o.get("evidence_sources"):
+                o["evidence_sources"] = enrich_evidence_sources(o["evidence_sources"])
+        except Exception:
+            pass  # best-effort, igual que en pipeline.py
+
+        try:
+            from utils.deadline_checker import verify_deadline
+            funder = o.get("funder") or {}
+            dl = verify_deadline(funder_url=funder.get("url") or "",
+                                 llm_deadline_text=funder.get("deadline") or "")
+            funder["deadline"] = dl["deadline_text"]
+            funder["deadline_iso"] = dl.get("deadline_iso") or ""
+            funder["deadline_status"] = dl["status"]
+            funder["deadline_label"] = dl["label"]
+            o["funder"] = funder
+
+            fb = dict(o.get("feasibility_breakdown") or {})
+            recompute = False
+            if dl["status"] == "cerrada":
+                # La fecha VERIFICADA (ground truth, re-descargada de la página oficial
+                # o parseada del propio texto si no hubo web) ya pasó — sin importar si
+                # coincidía o no con lo que el LLM había reportado. Confirmado con un caso
+                # real: sin este chequeo, una convocatoria marcada "Cerrada hace 585 días"
+                # seguía con deadline_feasibility=60 (nunca se detectaba discrepancia
+                # porque el LLM original no había dado ninguna fecha parseable).
+                #
+                # Forzar weighted_score=0 directamente (no solo el sub-score) porque
+                # deadline_feasibility solo pesa 10% en SCORE_WEIGHTS: zerarlo por sí
+                # solo deja el total en ~77/100, muy por encima del umbral de 60 — una
+                # convocatoria cerrada no es "10% menos viable", es 0% viable. Confirmado
+                # en vivo: sin este forzado directo, el caso real seguía pasando el filtro.
+                fb["deadline_feasibility"] = {
+                    "score": 0,
+                    "reason": f"Verificado: convocatoria ya cerrada ({dl['label']}).",
+                }
+                o["feasibility_breakdown"] = fb
+                o["weighted_score"] = 0.0
+                continue
+            elif dl.get("discrepancia"):
+                # La fecha real de la página oficial difiere de la que reportó el
+                # LLM (ambas vigentes, pero no coinciden): bajar deadline_feasibility.
+                fb["deadline_feasibility"] = {
+                    "score": min(40, fb.get("deadline_feasibility", {}).get("score", 40) or 40),
+                    "reason": (f"Discrepancia entre la fecha reportada y la verificada en la "
+                               f"página oficial ({dl.get('deadline_llm_iso')} vs {dl.get('deadline_iso')})."),
+                }
+                recompute = True
+            if recompute:
+                o["feasibility_breakdown"] = fb
+                o["weighted_score"] = config.weighted_score(
+                    o["feasibility_breakdown"], o.get("winning_probability", 0))
+        except Exception:
+            pass  # best-effort: nunca tumbar el scouting por un fallo de red
+
+    # Tras la revisión de discrepancia el score pudo bajar: re-aplicar filtro/orden.
+    cleaned = [o for o in cleaned if o.get("weighted_score", 0) >= _MIN_WEIGHTED_SCORE]
+    cleaned.sort(key=lambda x: x.get("weighted_score", 0), reverse=True)
+
+    # Verificación DETERMINISTA de que la URL del financiador realmente responde
+    # (no solo lo que el LLM afirma). Solo descarta por enlace confirmado muerto;
+    # "no_responde"/"acceso_restringido" pueden ser transitorios o bots bloqueados.
+    try:
+        from utils.url_verifier import verify_urls
+        urls = [(o.get("funder") or {}).get("url") or "" for o in cleaned]
+        states = verify_urls([u for u in urls if u.startswith("http")])
+        still_valid = []
+        for o, url in zip(cleaned, urls):
+            status = states.get(url)
+            if o.get("funder") is not None and status:
+                o["funder"]["url_status"] = status
+            if status == "url_muerta":
+                continue
+            still_valid.append(o)
+        cleaned = still_valid
+    except Exception:
+        pass  # verificación de URL es best-effort: no debe tumbar el scouting
 
     session.builder_log.append({
         "phase": "scout", "requested": provider, "used": used,

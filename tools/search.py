@@ -177,11 +177,50 @@ def execute_news_search(query: str, max_results: int = 6) -> str:
         return json.dumps({"error": str(e), "query": query}, ensure_ascii=False)
 
 
+_PDF_MAX_PAGES = 15
+
+
+def _extract_pdf_text(raw_bytes: bytes, max_chars: int) -> str | None:
+    """Extrae texto de un PDF (bases de convocatoria/TDR casi siempre vienen así).
+    Devuelve None si la extracción falla o no produce texto útil (p.ej. PDF escaneado)."""
+    try:
+        from io import BytesIO
+        from pypdf import PdfReader
+        reader = PdfReader(BytesIO(raw_bytes))
+        parts = []
+        for page in reader.pages[:_PDF_MAX_PAGES]:
+            try:
+                parts.append(page.extract_text() or "")
+            except Exception:
+                continue
+        text = "\n".join(parts).strip()
+        if len(text) < 200:  # probable PDF escaneado (imagen), sin capa de texto
+            return None
+        text = re.sub(r"[ \t\f\v]+", " ", text)
+        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+        if len(text) > max_chars:
+            text = text[:max_chars] + " […]"
+        return text
+    except Exception:
+        return None
+
+
 def execute_fetch_page(url: str) -> str:
     try:
         req = Request(url, headers={"User-Agent": _UA, "Accept-Language": "es,en;q=0.8"})
         with urlopen(req, timeout=SEARCH_TIMEOUT) as resp:
             ctype = resp.headers.get("Content-Type", "")
+            is_pdf = "application/pdf" in ctype or url.lower().split("?")[0].endswith(".pdf")
+            if is_pdf:
+                raw_bytes = resp.read(15_000_000)  # las bases oficiales suelen ser PDF pesados
+                text = _extract_pdf_text(raw_bytes, SEARCH_FETCH_CHARS)
+                if text is None:
+                    return json.dumps(
+                        {"url": url, "note": "PDF no extraíble (posible escaneo sin capa de texto)."},
+                        ensure_ascii=False,
+                    )
+                return json.dumps({"url": url, "domain": _domain(url), "text": text,
+                                   "source_format": "pdf"}, ensure_ascii=False)
             if "html" not in ctype and "text" not in ctype and ctype:
                 return json.dumps(
                     {"url": url, "note": f"Contenido no textual ({ctype}). No descargado."},
@@ -274,11 +313,12 @@ def execute_deep_search(queries: list, fetch_pages: int = SEARCH_FETCH_PAGES) ->
         return url, text
 
     fetched = 0
-    with ThreadPoolExecutor(max_workers=min(pool_size, 10)) as ex:
-        for url, text in ex.map(_fetch_one, list(url_to_hit)):
-            if text and fetched < n_fetch:
-                url_to_hit[url]["page_content"] = text
-                fetched += 1
+    if pool_size > 0 and n_fetch > 0:
+        with ThreadPoolExecutor(max_workers=min(pool_size, 10)) as ex:
+            for url, text in ex.map(_fetch_one, list(url_to_hit)):
+                if text and fetched < n_fetch:
+                    url_to_hit[url]["page_content"] = text
+                    fetched += 1
 
     summary = {
         "queries_ejecutadas": queries,
@@ -300,82 +340,126 @@ ALL_TOOLS = [DEEP_SEARCH_TOOL, WEB_SEARCH_TOOL, FETCH_PAGE_TOOL]
 
 
 # ── Pre-built deep query packs for opportunity hunting ─────────────────────
-def opportunity_queries(topic: str) -> list:
-    """Genera un paquete amplio de queries para búsqueda profunda por tema.
+def opportunity_queries_by_category(topic: str) -> dict:
+    """Genera el paquete de queries de búsqueda profunda, ETIQUETADO por categoría.
 
     Cubre: portales oficiales, multilaterales, bilaterales, ONU, UE, fundaciones,
-    agregadores, LinkedIn y consultoría/OSC en Ecuador (perfil JOMAP/CMAJ).
+    consultoría/OSC (perfil JOMAP/CMAJ), agregadores y LinkedIn.
+
+    Se expone por categoría (en vez de una sola lista plana) para que quien
+    trunque la lista a un máximo de queries (SEARCH_MAX_QUERIES) pueda tomar una
+    muestra representativa de CADA categoría en vez de cortar en orden fijo —
+    con el orden fijo anterior, cualquier corte por debajo de ~35 queries dejaba
+    SIEMPRE fuera fundaciones y agregadores, sin importar el tema buscado.
     """
     t = topic.strip()
     year = "2025 2026 2027"
-    base = [
-        # ── Portales generales + Ecuador ───────────────────────────────────
-        f"convocatoria financiamiento no reembolsable Ecuador {t} {year}",
-        f"fondos concursables {t} Ecuador organizaciones sociedad civil OSC {year}",
-        f"grants non-refundable funding Ecuador {t} {year} open call NGO",
-        f"call for proposals {t} Ecuador Latin America South America {year}",
-        f"requisitos bases convocatoria {t} Ecuador elegibilidad presupuesto formulario",
-        # ── Multilaterales y bancos de desarrollo ──────────────────────────
-        f"BID IADB BID-LAB FOMIN convocatoria {t} Ecuador {year}",
-        f"CAF cooperación técnica {t} Ecuador Azuay Cuenca {year}",
-        f"Banco Mundial World Bank {t} Ecuador consultoría contrato {year}",
-        f"GEF FMAM fondo global medio ambiente {t} Ecuador {year}",
-        f"BCIE FONPLATA {t} Ecuador financiamiento {year}",
-        # ── Sistema ONU ─────────────────────────────────────────────────────
-        f"PNUD UNDP {t} Ecuador convocatoria sociedad civil consultoría {year}",
-        f"UNICEF OPS UNFPA {t} Ecuador propuesta organizacion {year}",
-        f"FAO OIT ILO UNESCO {t} Ecuador grant convocatoria {year}",
-        f"ONU Mujeres UN Women {t} Ecuador organización género {year}",
-        # ── Unión Europea + bilaterales ─────────────────────────────────────
-        f"Unión Europea EU cooperación internacional {t} Ecuador grant {year}",
-        f"GIZ cooperación alemana {t} Ecuador Azuay {year}",
-        f"USAID {t} Ecuador convocatoria ONG {year}",
-        f"AECID cooperación española {t} Ecuador {year}",
-        f"COSUDE Suiza {t} Ecuador convocatoria {year}",
-        f"AFD Agence Française Développement {t} Équateur {year}",
-        f"JICA cooperación japonesa {t} Ecuador {year}",
-        # ── Fundaciones internacionales ─────────────────────────────────────
-        f"Gates Foundation Ford Foundation {t} Ecuador {year}",
-        f"Fundación Avina Kellogg {t} Ecuador Latinoamérica {year}",
-        f"Bloomberg Philanthropies {t} Ecuador municipalities cities {year}",
-        # ── Consultoría técnica y capacitación (perfil CMAJ) ────────────────
-        f"consultoría técnica arquitectura ingeniería Ecuador Azuay convocatoria {year}",
-        f"licitación consultoría planificación urbana ordenamiento territorial Ecuador {year}",
-        f"capacitación formación profesional Ecuador {t} financiamiento {year}",
-        f"fortalecimiento capacidades organizaciones Ecuador {t} cooperación {year}",
-        # ── OSC / fundaciones / emprendimiento (perfil JOMAP) ───────────────
-        f"convocatoria fundaciones organizaciones sin fines de lucro Ecuador {t} {year}",
-        f"emprendimiento MIPYMES desarrollo empresarial Ecuador {t} fondos {year}",
-        f"fortalecimiento organizaciones gremiales Ecuador {t} cooperacion internacional {year}",
-        # ── Agregadores de convocatorias frescos ───────────────────────────
-        f"site:reliefweb.int call for proposals {t} Ecuador",
-        f"site:devex.com {t} Ecuador funding opportunity {year}",
-        f"site:fundsforngos.org {t} Ecuador {year}",
-        f"site:ungm.org {t} Ecuador RFP contract",
-        # ── LinkedIn — anuncios de program officers ─────────────────────────
-        f"site:linkedin.com/posts {t} grant call proposals Ecuador {year}",
-        f"site:linkedin.com/pulse {t} funding Ecuador convocatoria {year}",
-        f"site:linkedin.com/posts convocatoria {t} Azuay Cuenca {year}",
-    ]
-    # Temáticas específicas adicionales
+    cats: dict[str, list[str]] = {
+        "portales": [
+            f"convocatoria financiamiento no reembolsable Ecuador {t} {year}",
+            f"fondos concursables {t} Ecuador organizaciones sociedad civil OSC {year}",
+            f"grants non-refundable funding Ecuador {t} {year} open call NGO",
+            f"call for proposals {t} Ecuador Latin America South America {year}",
+            f"requisitos bases convocatoria {t} Ecuador elegibilidad presupuesto formulario",
+        ],
+        "multilateral": [
+            f"BID IADB BID-LAB FOMIN convocatoria {t} Ecuador {year}",
+            f"CAF cooperación técnica {t} Ecuador Azuay Cuenca {year}",
+            f"Banco Mundial World Bank {t} Ecuador consultoría contrato {year}",
+            f"GEF FMAM fondo global medio ambiente {t} Ecuador {year}",
+            f"BCIE FONPLATA {t} Ecuador financiamiento {year}",
+        ],
+        "onu": [
+            f"PNUD UNDP {t} Ecuador convocatoria sociedad civil consultoría {year}",
+            f"UNICEF OPS UNFPA {t} Ecuador propuesta organizacion {year}",
+            f"FAO OIT ILO UNESCO {t} Ecuador grant convocatoria {year}",
+            f"ONU Mujeres UN Women {t} Ecuador organización género {year}",
+        ],
+        "ue_bilateral": [
+            f"Unión Europea EU cooperación internacional {t} Ecuador grant {year}",
+            f"GIZ cooperación alemana {t} Ecuador Azuay {year}",
+            f"USAID {t} Ecuador convocatoria ONG {year}",
+            f"AECID cooperación española {t} Ecuador {year}",
+            f"COSUDE Suiza {t} Ecuador convocatoria {year}",
+            f"AFD Agence Française Développement {t} Équateur {year}",
+            f"JICA cooperación japonesa {t} Ecuador {year}",
+        ],
+        "fundaciones": [
+            f"Gates Foundation Ford Foundation {t} Ecuador {year}",
+            f"Fundación Avina Kellogg {t} Ecuador Latinoamérica {year}",
+            f"Bloomberg Philanthropies {t} Ecuador municipalities cities {year}",
+            f"Wellcome Trust {t} Ecuador Latin America grant {year}",
+        ],
+        "consultoria": [
+            f"consultoría técnica arquitectura ingeniería Ecuador Azuay convocatoria {year}",
+            f"licitación consultoría planificación urbana ordenamiento territorial Ecuador {year}",
+            f"capacitación formación profesional Ecuador {t} financiamiento {year}",
+            f"fortalecimiento capacidades organizaciones Ecuador {t} cooperación {year}",
+        ],
+        "osc": [
+            f"convocatoria fundaciones organizaciones sin fines de lucro Ecuador {t} {year}",
+            f"emprendimiento MIPYMES desarrollo empresarial Ecuador {t} fondos {year}",
+            f"fortalecimiento organizaciones gremiales Ecuador {t} cooperacion internacional {year}",
+        ],
+        "agregadores": [
+            f"site:reliefweb.int call for proposals {t} Ecuador",
+            f"site:devex.com {t} Ecuador funding opportunity {year}",
+            f"site:fundsforngos.org {t} Ecuador {year}",
+            f"site:ungm.org {t} Ecuador RFP contract",
+        ],
+        "linkedin": [
+            f"site:linkedin.com/posts {t} grant call proposals Ecuador {year}",
+            f"site:linkedin.com/pulse {t} funding Ecuador convocatoria {year}",
+            f"site:linkedin.com/posts convocatoria {t} Azuay Cuenca {year}",
+        ],
+        "tematicas": [],
+    }
+
     tl = t.lower()
     if any(k in tl for k in ("ambient", "clima", "agua", "biodivers", "bosque", "carbono", "hidric")):
-        base.append(f"GEF GCF Fondo Verde Clima {t} Ecuador {year} propuesta")
-        base.append(f"Green Climate Fund {t} Ecuador accreditated entity {year}")
+        cats["tematicas"] += [
+            f"GEF GCF Fondo Verde Clima {t} Ecuador {year} propuesta",
+            f"Green Climate Fund {t} Ecuador accreditated entity {year}",
+        ]
     if any(k in tl for k in ("urban", "ciudad", "vivienda", "infraestructura", "territorio")):
-        base.append(f"ONU-Habitat UN-Habitat {t} Ecuador Cuenca {year}")
-        base.append(f"BID ciudades sostenibles infraestructura {t} Ecuador {year}")
+        cats["tematicas"] += [
+            f"ONU-Habitat UN-Habitat {t} Ecuador Cuenca {year}",
+            f"BID ciudades sostenibles infraestructura {t} Ecuador {year}",
+        ]
     if any(k in tl for k in ("género", "mujer", "mujeres", "equidad", "gender")):
-        base.append(f"ONU Mujeres UNFPA {t} Ecuador organización {year}")
+        cats["tematicas"].append(f"ONU Mujeres UNFPA {t} Ecuador organización {year}")
     if any(k in tl for k in ("educac", "capacitac", "formac", "docente")):
-        base.append(f"UNESCO UNICEF educación capacitación {t} Ecuador {year}")
-    # Dedup conservando orden
-    seen, out = set(), []
-    for q in base:
+        cats["tematicas"].append(f"UNESCO UNICEF educación capacitación {t} Ecuador {year}")
+
+    return cats
+
+
+def opportunity_queries(topic: str) -> list:
+    """Devuelve el paquete de queries ENTRELAZADO (round-robin) por categoría.
+
+    El entrelazado garantiza que un corte `[:N]` tomado desde el frente de esta
+    lista (como hace execute_deep_search con SEARCH_MAX_QUERIES) incluya SIEMPRE
+    una muestra de cada categoría — incluidas fundaciones y agregadores — en vez
+    de agotar solo las primeras categorías del orden fijo original.
+    """
+    cats = opportunity_queries_by_category(topic)
+    iterators = [iter(v) for v in cats.values() if v]
+    out: list[str] = []
+    while iterators:
+        still_going = []
+        for it in iterators:
+            q = next(it, None)
+            if q is not None:
+                out.append(q)
+                still_going.append(it)
+        iterators = still_going
+    # Dedup conservando el orden entrelazado
+    seen, deduped = set(), []
+    for q in out:
         if q not in seen:
             seen.add(q)
-            out.append(q)
-    return out
+            deduped.append(q)
+    return deduped
 
 
 def linkedin_queries(topic: str) -> list:

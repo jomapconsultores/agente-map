@@ -145,6 +145,28 @@ MAX_TOKENS_WRITER = 16000    # límite de salida del redactor; subir solo si tu 
 MAX_TOKENS_REVIEWER = 10000  # 8000→10000: revisiones más detalladas y accionables
 MAX_TOKENS_FINANCIAL = 8000
 
+# Autocrítica interna del redactor: antes de exponer el borrador al gate externo, el
+# propio redactor lo audita contra quality_markers/evaluation_criteria y reescribe
+# lo débil — para los tipos de mayor exigencia, donde el costo de una llamada extra
+# está claramente justificado por la calidad ganada.
+WRITER_SELF_REVIEW = os.getenv("WRITER_SELF_REVIEW", "true").lower() in ("1", "true", "yes")
+WRITER_SELF_REVIEW_DOC_TYPES = {"tesis", "articulo_cientifico", "tdr"}
+
+# Generación MULTI-PASADA: MAX_TOKENS_WRITER (16000) rinde en español unas
+# 9000-11000 palabras como techo duro POR LLAMADA — una tesis doctoral real (25-45k
+# palabras) es matemáticamente imposible de producir sin truncar en una sola llamada.
+# Por encima de este umbral, writer.py arma primero un plan sección-por-sección y
+# redacta cada sección con su propio presupuesto de tokens completo.
+MULTIPASS_MIN_WORDS = int(os.getenv("MULTIPASS_MIN_WORDS", "6000"))
+
+# Consenso de 2 revisores independientes: el veredicto final hoy es una sola
+# llamada a un único modelo (Claude). Ningún jurado doctoral ni comité editorial
+# real aprueba con un solo árbitro — para los tipos de mayor riesgo reputacional,
+# un segundo modelo distinto (proveedor no-Claude) evalúa de forma independiente y
+# solo se aprueba si AMBOS lo hacen.
+SECOND_OPINION_DOC_TYPES = {"tesis", "articulo_cientifico", "peer_review", "tdr"}
+SECOND_OPINION_PROVIDER = os.getenv("SECOND_OPINION_PROVIDER", "deepseek")
+
 # ── Pipeline ───────────────────────────────────────────────────────────────
 MAX_REVIEW_CYCLES = 5
 # Subciclos de consenso del equipo constructor (1°,2°,3°) antes de pasar a Claude.
@@ -162,7 +184,11 @@ VIABILITY_THRESHOLD = 55      # Score mínimo de viabilidad para continuar (0-10
 # priorizar velocidad sobre profundidad.
 SEARCH_MAX_RESULTS = 15       # 12→15: resultados por query individual
 SEARCH_SAFE = "moderate"
-SEARCH_MAX_QUERIES = 20       # 14→20: nº máximo de queries en una búsqueda profunda
+SEARCH_MAX_QUERIES = 32       # 20→32: nº máximo de queries en una búsqueda profunda.
+                               # opportunity_queries() ahora entrelaza categorías (round-robin)
+                               # antes de este corte, así que subirlo SÍ amplía cobertura real
+                               # (antes del entrelazado, cortar en 20 sobre ~40 queries en orden
+                               # fijo dejaba fuera SIEMPRE fundaciones/agregadores/LinkedIn).
 SEARCH_FETCH_PAGES = 14       # 10→14: páginas reales descargadas y leídas (descarga paralela)
 SEARCH_FETCH_CHARS = 14000    # 10000→14000: lee requisitos completos del financiador
 SEARCH_TIMEOUT = 12           # timeout (s) al descargar una página

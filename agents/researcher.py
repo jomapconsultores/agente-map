@@ -235,17 +235,37 @@ def _gather_evidence(session: ProjectSession, seed: dict | None = None) -> str:
         pieces.append("=== EVIDENCIA DE BÚSQUEDA WEB (enfocada) ===\n" + _clip(evidence, 24000))
         return "\n\n".join(pieces)
 
-    # Búsqueda profunda: usa el paquete base de 35+ queries directamente.
-    # Se eliminó el round-trip extra de _propose_queries (LLM call que añadía
-    # 5-15s sin mejorar significativamente los resultados vs. el paquete base).
+    # Búsqueda profunda: el paquete estático (35+ queries por categoría) cubre
+    # bien los sectores anticipados por keyword-matching (ambiente, urbano,
+    # género, educación), pero cualquier sector no anticipado (salud, digital,
+    # cultura, derechos humanos, migración...) no recibe ningún refuerzo. Una
+    # oleada COMPLEMENTARIA de queries que el propio LLM dirige al sector real
+    # del tema rellena ese hueco.
+    #
+    # Se ejecuta en SECUENCIA (no en paralelo con la oleada estática): cada
+    # llamada a execute_deep_search ya abre sus propios ThreadPoolExecutor
+    # internos (búsqueda + descarga de páginas); anidar un tercer nivel de
+    # threads aquí, ejecutándose además dentro del hilo de un BackgroundTask de
+    # Starlette, provocó una caída total del proceso del servidor en pruebas
+    # reales (sin traceback — consistente con agotamiento de threads/handles
+    # en Windows). El costo es más latencia, no más riesgo de crash.
     base = opportunity_queries(topic)
-    queries = base
     try:
-        evidence = execute_deep_search(queries, fetch_pages=SEARCH_FETCH_PAGES)
+        evidence = execute_deep_search(base, fetch_pages=SEARCH_FETCH_PAGES)
     except Exception as ex:  # la búsqueda nunca debe tumbar el pipeline
-        evidence = json.dumps({"error": f"deep_search falló: {ex}", "queries": queries},
+        evidence = json.dumps({"error": f"deep_search falló: {ex}", "queries": base},
                               ensure_ascii=False)
     pieces.append("=== EVIDENCIA DE BÚSQUEDA WEB (deep_search) ===\n" + _clip(evidence, 28000))
+
+    try:
+        proposed = _propose_queries(provider, topic, [])
+        extra = [q for q in proposed if q not in base][:10]
+        evidence_llm = execute_deep_search(extra, fetch_pages=6) if extra else ""
+    except Exception:
+        evidence_llm = ""
+    if evidence_llm:
+        pieces.append("=== EVIDENCIA COMPLEMENTARIA (queries dirigidas por IA al sector real del tema) ===\n"
+                      + _clip(evidence_llm, 10000))
 
     return "\n\n".join(pieces)
 
@@ -391,7 +411,8 @@ Con base en la evidencia anterior, responde ÚNICAMENTE con este JSON (sin texto
   "international_guidelines": ["<norma internacional/organizacional/editorial 1>"],
   "key_requirements": ["<requisito indispensable 1>"],
   "quality_markers": ["<marca de excelencia 1>"],
-  "source_notes": "<fuentes y referencias reales encontradas, con datos verificables>"
+  "source_notes": "<fuentes y referencias reales encontradas, con datos verificables>",
+  "academic_level": "<SOLO si el tipo de documento es académico (p.ej. tesis): 'colegio'|'pregrado'|'maestria'|'doctorado'|'postdoctorado' según lo que indique la solicitud del usuario; si no aplica o no se puede determinar, usa 'pregrado'>"
 }}
 """
     last_err2: Exception | None = None
@@ -411,6 +432,22 @@ Con base en la evidencia anterior, responde ÚNICAMENTE con este JSON (sin texto
         raise last_err2
 
     fmt = FormatSpec.from_dict({**default_fmt, **(data.get("format_spec") or {})})
+    academic_level = str(data.get("academic_level") or "").strip().lower()
+    evaluation_criteria = all_criteria(dt)
+
+    # Escala de exigencia por nivel académico real (hoy solo aplica a "tesis"): un
+    # colegio y un doctorado no deben juzgarse con el mismo piso de extensión ni
+    # los mismos criterios — ver models.doc_types.level_requirements.
+    if dt.key == "tesis" and academic_level:
+        from models.doc_types import level_requirements
+        lvl = level_requirements(academic_level)
+        fmt_dict = fmt.as_dict()
+        fmt_dict["min_words"] = max(int(fmt_dict.get("min_words") or 0), lvl["min_words"])
+        fmt = FormatSpec.from_dict(fmt_dict)
+        evaluation_criteria = evaluation_criteria + [
+            c for c in lvl["extra_criteria"] if c not in evaluation_criteria
+        ]
+
     session.builder_log.append({"phase": "research_brief", "requested": provider, "used": used})
     return DocumentBrief(
         doc_type_key=dt.key,
@@ -426,7 +463,8 @@ Con base en la evidencia anterior, responde ÚNICAMENTE con este JSON (sin texto
         quality_markers=data.get("quality_markers", []),
         source_notes=data.get("source_notes", ""),
         needs_budget_excel=dt.needs_budget_excel,
-        evaluation_criteria=all_criteria(dt),
+        evaluation_criteria=evaluation_criteria,
         rigor_notes=dt.rigor_notes,
         raw=raw,
+        academic_level=academic_level or "pregrado",
     )

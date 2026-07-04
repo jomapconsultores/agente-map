@@ -68,11 +68,27 @@ def _log(session_id: str, phase: str, label: str, icon: str = "⚙",
                                 icon=icon, status=status, detail=detail)
 
 
-def _pause_if_requested(session_id: str, session: "ProjectSession") -> bool:
-    """Verifica si el usuario solicitó pausa. Si es así, detiene el pipeline limpiamente.
-    Devuelve True si se debe abortar."""
+def _keep_quality_notes(session: "ProjectSession", phase: str, gate_result: dict) -> None:
+    """Un gate que APRUEBA con observaciones no críticas ("issues") las perdía para
+    siempre: solo se capturaba feedback cuando el gate RECHAZABA. Las acumula como
+    contexto advisorio (no correcciones forzosas) para el redactor y el veredicto."""
+    for issue in gate_result.get("issues") or []:
+        note = f"[{phase}] {issue}"
+        if note not in session.quality_notes:
+            session.quality_notes.append(note)
+
+
+def _pause_if_requested(session_id: str, session: "ProjectSession",
+                        research_approved: bool = False) -> bool:
+    """Verifica si el usuario solicitó pausa. Si es así, persiste el progreso ya
+    logrado y detiene el pipeline limpiamente. Devuelve True si se debe abortar."""
     if not repository.is_pause_requested(session_id):
         return False
+    session.research_approved = research_approved
+    try:
+        save_session(session)  # persiste analysis/brief/financial/proposal_versions ya hechos
+    except Exception:
+        pass  # pausar nunca debe fallar por un error de persistencia
     _log(session_id, "pausa", "Pausado por el usuario", "⏸", "paused",
          "Retomable con el botón Continuar desde donde lo dejaste")
     _mark_failed(session_id, "⏸ Pausado por el usuario · usa Continuar para reanudar")
@@ -270,6 +286,27 @@ def run_pipeline(
     )
 
     _mark_running(session_id, owner_user_id)
+    # Un pipeline que arranca (fresco o "Continuar") nunca debe quedar pre-pausado:
+    # sin esto, una sesión pausada una vez se repausaba de inmediato para siempre.
+    repository.clear_pause_requested(session_id)
+
+    # ── Reanudación tras pausa: reutiliza investigación/redacción ya aprobadas ──
+    resumed_state = None
+    try:
+        resumed_state = repository.load_resumable_state(session_id)
+    except Exception:
+        resumed_state = None
+    if resumed_state:
+        session.analysis = resumed_state["analysis"]
+        session.brief = resumed_state["brief"]
+        session.financial = resumed_state["financial"]
+        session.proposal_versions = resumed_state["proposal_versions"] or []
+        if session.proposal_versions:
+            session.final_proposal = session.proposal_versions[-1]
+        session.research_approved = True
+        _log(session_id, "resume", "Reanudando sesión pausada", "▶",
+             "done", "Se reutiliza la investigación ya aprobada — no se repite la búsqueda web")
+
     _log(session_id, "fase0", "Clasificando tipo de documento", "🔍", "done",
          f"Tipo detectado: {resolved_type}")
 
@@ -287,112 +324,132 @@ def run_pipeline(
         approved = False
         # Mejor versión lograda (por si ningún intento alcanza el 90).
         best = {"score": -1.0, "proposal": None, "financial": None}
+        # Feedback acumulado de gates fallidos, para que el reintento no redacte "a ciegas".
+        pending_corrections: list[str] = []
+        # Una vez Gate 1 aprueba la investigación, los reinicios por Gate 2/3/4 NO
+        # deben repetirla: es la fase más cara (búsqueda web + varias llamadas LLM).
+        # Si se está reanudando una sesión pausada, ya viene en True (ver arriba).
+        research_approved = session.research_approved
 
         for attempt in range(1, MAX_PIPELINE_RESTARTS + 1):
             session.attempts = attempt
             session.current_cycle = attempt
             cycle_label = f" (ciclo {attempt})" if attempt > 1 else ""
 
-            if _pause_if_requested(session_id, session):
+            if _pause_if_requested(session_id, session, research_approved):
                 return session
 
-            # ── FASE 1 — INVESTIGACIÓN WEB + ANÁLISIS (IA investigadora) ──────
-            _log(session_id, "fase1", f"Investigando fuentes y analizando{cycle_label}",
-                 "🌐", "running", "Mistral busca convocatorias y verifica elegibilidad")
-            try:
-                if doc_type.is_proposal:
-                    analysis = researcher.run(session, api_key, seed=seed_opportunity)
-                    session.analysis = analysis
-                    if not analysis.viable:
-                        _log(session_id, "fase1", "Análisis: oportunidad no viable", "🚫", "done")
-                        session.approved = False
-                        session.inconclusive_reason = "Análisis de viabilidad: NO-GO."
-                        save_session(session)
-                        _mark_completed(session_id, approved=False)
-                        return session
-                    session.brief = classifier.analysis_to_brief(analysis, resolved_type)
-                else:
-                    session.brief = researcher.build_brief(session, resolved_type, api_key)
-            except Exception as research_err:
-                _log(session_id, "fase1",
-                     f"Error en investigación (ciclo {attempt}) — reintentando",
-                     "⚠️", "warning", str(research_err)[:200])
-                if attempt >= MAX_PIPELINE_RESTARTS:
-                    raise
-                continue  # reintenta el ciclo completo
+            if not research_approved:
+                # ── FASE 1 — INVESTIGACIÓN WEB + ANÁLISIS (IA investigadora) ──
+                _log(session_id, "fase1", f"Investigando fuentes y analizando{cycle_label}",
+                     "🌐", "running", "Mistral busca convocatorias y verifica elegibilidad")
+                try:
+                    if doc_type.is_proposal:
+                        analysis = researcher.run(session, api_key, seed=seed_opportunity)
+                        session.analysis = analysis
+                        if not analysis.viable:
+                            _log(session_id, "fase1", "Análisis: oportunidad no viable", "🚫", "done")
+                            session.approved = False
+                            session.inconclusive_reason = "Análisis de viabilidad: NO-GO."
+                            save_session(session)
+                            _mark_completed(session_id, approved=False)
+                            return session
+                        session.brief = classifier.analysis_to_brief(analysis, resolved_type)
+                    else:
+                        session.brief = researcher.build_brief(session, resolved_type, api_key)
+                except Exception as research_err:
+                    _log(session_id, "fase1",
+                         f"Error en investigación (ciclo {attempt}) — reintentando",
+                         "⚠️", "warning", str(research_err)[:200])
+                    if attempt >= MAX_PIPELINE_RESTARTS:
+                        raise
+                    continue  # reintenta el ciclo completo
 
-            # ── VERIFICACIÓN FEHACIENTE DE URLS ──────────────────────────────
-            # Comprueba HTTP real de cada fuente citada y del funder_url.
-            # No bloquea el pipeline si falla: es best-effort.
-            try:
-                from utils.url_verifier import enrich_evidence_sources, verify_single
-                if session.analysis and session.analysis.evidence_sources:
-                    session.analysis.evidence_sources = enrich_evidence_sources(
-                        session.analysis.evidence_sources)
-                if session.analysis and getattr(session.analysis, "funder", None):
-                    funder = session.analysis.funder
-                    if funder and getattr(funder, "url", None):
-                        funder_status = verify_single(funder.url)
-                        session.analysis.funder.url_status = funder_status
-                        if funder_status not in ("activo", "acceso_restringido"):
-                            session.analysis.funder.url = None  # no mostrar URL muerta
-                n_verified = sum(
-                    1 for s in (session.analysis.evidence_sources or [])
-                    if s.get("verification") == "verificado")
-                _log(session_id, "fase1",
-                     f"URLs verificadas: {n_verified}/{len(session.analysis.evidence_sources or [])} activas",
-                     "🔗", "done")
-            except Exception:
-                pass  # verificación es best-effort
+                # ── VERIFICACIÓN FEHACIENTE DE URLS ──────────────────────────
+                # Comprueba HTTP real de cada fuente citada y del funder_url.
+                # No bloquea el pipeline si falla: es best-effort.
+                try:
+                    from utils.url_verifier import enrich_evidence_sources, verify_single
+                    if session.analysis and session.analysis.evidence_sources:
+                        session.analysis.evidence_sources = enrich_evidence_sources(
+                            session.analysis.evidence_sources)
+                    if session.analysis and getattr(session.analysis, "funder", None):
+                        funder = session.analysis.funder
+                        if funder and getattr(funder, "url", None):
+                            funder_status = verify_single(funder.url)
+                            session.analysis.funder.url_status = funder_status
+                            if funder_status not in ("activo", "acceso_restringido"):
+                                session.analysis.funder.url = None  # no mostrar URL muerta
+                    n_verified = sum(
+                        1 for s in (session.analysis.evidence_sources or [])
+                        if s.get("verification") == "verificado")
+                    _log(session_id, "fase1",
+                         f"URLs verificadas: {n_verified}/{len(session.analysis.evidence_sources or [])} activas",
+                         "🔗", "done")
+                except Exception:
+                    pass  # verificación es best-effort
 
-            # ── VERIFICACIÓN FEHACIENTE DE FECHA DE CIERRE ─────────────────
-            try:
-                from utils.deadline_checker import verify_deadline
-                if session.analysis and getattr(session.analysis, "funder", None):
-                    funder = session.analysis.funder
-                    dl = verify_deadline(
-                        funder_url=getattr(funder, "url", "") or "",
-                        llm_deadline_text=getattr(funder, "deadline", "") or "",
-                    )
-                    funder.deadline = dl["deadline_text"]
-                    funder.deadline_iso = dl.get("deadline_iso") or ""
-                    funder.deadline_status = dl["status"]
-                    funder.deadline_dias = dl.get("dias_restantes")
-                    funder.deadline_label = dl["label"]
-                    _log(session_id, "fase1", f"Convocatoria: {dl['label']}", "📅", "done")
-            except Exception:
-                pass
+                # ── VERIFICACIÓN FEHACIENTE DE FECHA DE CIERRE ───────────────
+                try:
+                    from utils.deadline_checker import verify_deadline
+                    if session.analysis and getattr(session.analysis, "funder", None):
+                        funder = session.analysis.funder
+                        dl = verify_deadline(
+                            funder_url=getattr(funder, "url", "") or "",
+                            llm_deadline_text=getattr(funder, "deadline", "") or "",
+                        )
+                        funder.deadline = dl["deadline_text"]
+                        funder.deadline_iso = dl.get("deadline_iso") or ""
+                        funder.deadline_status = dl["status"]
+                        funder.deadline_dias = dl.get("dias_restantes")
+                        funder.deadline_label = dl["label"]
+                        detail = ""
+                        if dl.get("discrepancia"):
+                            detail = (f"⚠️ La fecha del LLM ({dl.get('deadline_llm_iso')}) no "
+                                      f"coincide con la de la página oficial — se usó la web.")
+                        _log(session_id, "fase1", f"Convocatoria: {dl['label']}", "📅", "done", detail)
+                except Exception:
+                    pass
 
-            _log(session_id, "fase1", f"Investigación completada{cycle_label}", "🌐", "done",
-                 f"Viabilidad: {getattr(session.analysis, 'viability_score', '—')}/100" if session.analysis else "")
+                _log(session_id, "fase1", f"Investigación completada{cycle_label}", "🌐", "done",
+                     f"Viabilidad: {getattr(session.analysis, 'viability_score', '—')}/100" if session.analysis else "")
 
-            # Enriquecer el brief con los requisitos del intake (secciones, restricciones)
-            _enrich_brief_with_intake(session)
+                # Enriquecer el brief con los requisitos del intake (secciones, restricciones)
+                _enrich_brief_with_intake(session)
 
-            # ── GATE 1 — la investigación la audita OTRA IA ──────────────────
-            _log(session_id, "gate1", f"Gate 1: auditando investigación{cycle_label}",
-                 "🔎", "running", "Codestral verifica fuentes reales y cobertura de lineamientos")
-            g1 = phase_review.review(
-                ROLE_REVIEW_RESEARCH, phase="investigación",
-                brief=session.brief, content=_research_content(session),
-                focus="Verifica que la investigación esté fundamentada en fuentes reales "
-                      "(con URL), sin datos inventados, y que cubra lineamientos y requisitos.",
-            )
-            session.phase_reviews.append({"attempt": attempt, **g1})
-            if not g1["passed"]:
-                _log(session_id, "gate1", f"Gate 1 no aprobado — reiniciando{cycle_label}",
-                     "🔄", "warning", f"Puntaje: {g1.get('score', '—')}/100 · {g1.get('verdict', '')[:120]}")
-                continue  # VUELVE AL INICIO: reinvestiga
-            _log(session_id, "gate1", f"Gate 1 aprobado{cycle_label}", "✅", "done",
-                 f"Puntaje: {g1.get('score', '—')}/100")
+                # ── GATE 1 — la investigación la audita OTRA IA ──────────────
+                _log(session_id, "gate1", f"Gate 1: auditando investigación{cycle_label}",
+                     "🔎", "running", "Codestral verifica fuentes reales y cobertura de lineamientos")
+                g1 = phase_review.review(
+                    ROLE_REVIEW_RESEARCH, phase="investigación",
+                    brief=session.brief, content=_research_content(session),
+                    focus="Verifica que la investigación esté fundamentada en fuentes reales "
+                          "(con URL), sin datos inventados, y que cubra lineamientos y requisitos.",
+                )
+                session.phase_reviews.append({"attempt": attempt, **g1})
+                if not g1["passed"]:
+                    pending_corrections = (g1.get("critical") or []) + (g1.get("issues") or [])
+                    _log(session_id, "gate1", f"Gate 1 no aprobado — reiniciando{cycle_label}",
+                         "🔄", "warning",
+                         f"Puntaje: {g1.get('score', '—')}/100 · " +
+                         "; ".join(pending_corrections[:3] or [g1.get("recommendation", "")])[:200])
+                    continue  # VUELVE AL INICIO: reinvestiga
+                _log(session_id, "gate1", f"Gate 1 aprobado{cycle_label}", "✅", "done",
+                     f"Puntaje: {g1.get('score', '—')}/100")
+                _keep_quality_notes(session, "Gate 1 — investigación", g1)
+                research_approved = True
+            else:
+                _log(session_id, "fase1", f"Investigación ya aprobada — se reutiliza{cycle_label}",
+                     "🌐", "done", "Gate 1 ya había pasado; no se repite la búsqueda web")
 
-            if _pause_if_requested(session_id, session):
+            if _pause_if_requested(session_id, session, research_approved):
                 return session
 
             # ── FASE 2 — REDACCIÓN (IA redactora) ────────────────────────────
             _log(session_id, "fase2", f"Redactando documento{cycle_label}",
                  "✍️", "running", "Codestral estructura y redacta la propuesta completa")
-            proposal = writer.run(session, [], api_key, provider=ROLE_WRITER)
+            proposal = writer.run(session, pending_corrections, api_key, provider=ROLE_WRITER)
+            pending_corrections = []  # ya se aplicaron en esta redacción
             session.proposal_versions.append(proposal)
             session.final_proposal = proposal
             _log(session_id, "fase2", f"Redacción completada{cycle_label}", "✍️", "done",
@@ -409,13 +466,17 @@ def run_pipeline(
             )
             session.phase_reviews.append({"attempt": attempt, **g2})
             if not g2["passed"]:
+                pending_corrections = (g2.get("critical") or []) + (g2.get("issues") or [])
                 _log(session_id, "gate2", f"Gate 2 no aprobado — reiniciando{cycle_label}",
-                     "🔄", "warning", f"Puntaje: {g2.get('score', '—')}/100 · {g2.get('verdict', '')[:120]}")
+                     "🔄", "warning",
+                     f"Puntaje: {g2.get('score', '—')}/100 · " +
+                     "; ".join(pending_corrections[:3] or [g2.get("recommendation", "")])[:200])
                 continue  # VUELVE AL INICIO
             _log(session_id, "gate2", f"Gate 2 aprobado{cycle_label}", "✅", "done",
                  f"Puntaje: {g2.get('score', '—')}/100")
+            _keep_quality_notes(session, "Gate 2 — redacción", g2)
 
-            if _pause_if_requested(session_id, session):
+            if _pause_if_requested(session_id, session, research_approved):
                 return session
 
             # ── FASE 3 — ESTRUCTURACIÓN FINANCIERA (IA financiera) ───────────
@@ -444,19 +505,27 @@ def run_pipeline(
             )
             session.phase_reviews.append({"attempt": attempt, **g3})
             if not g3["passed"]:
+                pending_corrections = (g3.get("critical") or []) + (g3.get("issues") or [])
                 _log(session_id, "gate3", f"Gate 3 no aprobado — reiniciando{cycle_label}",
-                     "🔄", "warning", f"Puntaje: {g3.get('score', '—')}/100 · {g3.get('verdict', '')[:120]}")
+                     "🔄", "warning",
+                     f"Puntaje: {g3.get('score', '—')}/100 · " +
+                     "; ".join(pending_corrections[:3] or [g3.get("recommendation", "")])[:200])
                 continue  # VUELVE AL INICIO: reinvestiga y reescribe
             _log(session_id, "gate3", f"Gate 3 aprobado{cycle_label}", "✅", "done",
                  f"Puntaje: {g3.get('score', '—')}/100")
+            _keep_quality_notes(session, "Gate 3 — paquete completo", g3)
 
-            if _pause_if_requested(session_id, session):
+            if _pause_if_requested(session_id, session, research_approved):
                 return session
 
-            # ── FASE 4 — VEREDICTO FINAL 90/90 (Claude) ──────────────────────
-            _log(session_id, "fase4", f"Veredicto final 90/90{cycle_label}",
-                 "⚖️", "running", "Claude evalúa con criterios de máxima exigencia")
-            review = reviewer.run(session, proposal, api_key)
+            # ── FASE 4 — VEREDICTO FINAL (Claude, o consenso de 2 revisores) ──
+            dual = bool(session.brief and session.brief.doc_type_key in config.SECOND_OPINION_DOC_TYPES)
+            _log(session_id, "fase4", f"Veredicto final{cycle_label}",
+                 "⚖️", "running",
+                 "Consenso de 2 revisores independientes (máxima exigencia)" if dual
+                 else "Claude evalúa con criterios de máxima exigencia")
+            review = reviewer.run_dual(session, proposal, api_key) if dual \
+                else reviewer.run(session, proposal, api_key)
             session.review_results.append(review)
 
             if review.overall_score > best["score"]:
@@ -468,8 +537,11 @@ def run_pipeline(
                      "🏆", "done", f"Puntaje final: {review.overall_score:.0f}/100")
                 approved = True
                 break
+            pending_corrections = list(getattr(review, "corrections", None) or [])
             _log(session_id, "fase4", f"No aprobado — reiniciando{cycle_label}",
-                 "🔄", "warning", f"Puntaje: {review.overall_score:.0f}/100 — bajo el umbral 90")
+                 "🔄", "warning",
+                 f"Puntaje: {review.overall_score:.0f}/100 — bajo el umbral 90 · " +
+                 "; ".join(pending_corrections[:3])[:200])
             # No aprobó el 90/90 → VUELVE AL INICIO (reinvestiga)
 
         session.approved = approved

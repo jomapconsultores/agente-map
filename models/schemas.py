@@ -132,6 +132,12 @@ class DocumentBrief:
     # Se llena tras aprobar el documento (agents/statistics.py); persiste en el jsonb brief.
     statistics: dict = field(default_factory=dict)
 
+    # Nivel académico real (colegio|pregrado|maestria|doctorado|postdoctorado).
+    # Hoy solo lo usa doc_type_key="tesis" para escalar min_words y evaluation_criteria
+    # (ver models.doc_types.level_requirements) — un colegio y un doctorado no deben
+    # juzgarse con la misma exigencia. Vacío = se asume "pregrado".
+    academic_level: str = ""
+
 
 @dataclass
 class FinancialPackage:
@@ -195,3 +201,14 @@ class ProjectSession:
     # Producido por agents/intake.py. Contiene: required_sections, format_overrides,
     # key_constraints, org_refs, url_contents, raw_notes.
     intake_data: dict = field(default_factory=dict)
+
+    # True una vez Gate 1 aprobó la investigación. Se persiste para que, si el
+    # usuario pausa y luego continúa, el pipeline no repita la búsqueda web ya
+    # aprobada (ver core/pipeline.py: research_approved).
+    research_approved: bool = False
+
+    # Observaciones NO críticas de gates que igual APROBARON (score ≥ umbral pero con
+    # "issues"). Antes se perdían para siempre — solo se capturaba feedback cuando un
+    # gate rechazaba. Se inyectan como contexto advisorio (no correcciones forzosas)
+    # en el siguiente prompt de redacción/veredicto.
+    quality_notes: list = field(default_factory=list)

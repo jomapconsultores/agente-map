@@ -24,6 +24,23 @@ from typing import Optional
 _TIMEOUT = 8
 _MAX_PARALLEL = 6
 _UA = "Mozilla/5.0 (compatible; AgenteMAP-URLVerifier/1.0; +https://jomapconsultores.com)"
+_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+
+
+def _normalize_url(url: str) -> Optional[str]:
+    """Intenta llevar una URL sin esquema ('www.x.com/y') a una forma verificable
+    ('https://www.x.com/y'). Devuelve None si no es una URL web normalizable
+    (otro esquema como 'doi:'/'mailto:', o texto sin forma de dominio)."""
+    url = (url or "").strip()
+    if not url:
+        return None
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    if _SCHEME_RE.match(url):
+        return None  # otro esquema (doi:, mailto:, isbn:, ...): no es una URL web
+    if "." in url and " " not in url:
+        return "https://" + url
+    return None
 
 
 def _check_one(url: str) -> str:
@@ -86,19 +103,25 @@ def enrich_evidence_sources(evidence_sources: list[dict]) -> list[dict]:
       - acceso_restringido → "restringido"  (existe pero no es de libre acceso)
       - url_muerta         → "url_muerta"
       - no_responde        → "no_responde"
-      - url_invalida / vacía → deja el valor que tenía el LLM
+      - URL no vacía pero no normalizable como URL web → "no_verificable"
+      - vacía → deja el valor que tenía el LLM (no hay nada que verificar)
+
+    Nunca hereda silenciosamente el "verification" autoreportado por el LLM para una
+    URL no vacía: o se verifica de verdad, o se marca explícitamente como no verificable.
     """
     if not evidence_sources:
         return evidence_sources
 
     urls = [s.get("source_url") or "" for s in evidence_sources]
-    url_states = verify_urls([u for u in urls if u.startswith("http")])
+    normalized = {u: _normalize_url(u) for u in urls if u}
+    url_states = verify_urls([nu for nu in normalized.values() if nu])
 
     enriched = []
     for s in evidence_sources:
         s = dict(s)
         url = s.get("source_url") or ""
-        state = url_states.get(url)
+        norm = normalized.get(url)
+        state = url_states.get(norm) if norm else None
         if state == "activo":
             s["verification"] = "verificado"
             s["url_status"] = "activo"
@@ -111,7 +134,12 @@ def enrich_evidence_sources(evidence_sources: list[dict]) -> list[dict]:
         elif state == "no_responde":
             s["verification"] = "no_responde"
             s["url_status"] = "no_responde"
-        # si no hay URL o es inválida: dejamos el valor original del LLM
+        elif url:
+            # URL no vacía pero no normalizable/verificable: nunca confiar en la
+            # autoevaluación del LLM que generó el propio contenido.
+            s["verification"] = "no_verificable"
+            s["url_status"] = "no_verificable"
+        # url vacía: dejamos el valor original del LLM
         enriched.append(s)
     return enriched
 

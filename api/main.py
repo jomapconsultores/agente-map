@@ -78,7 +78,20 @@ def get_principal(authorization: Optional[str] = Header(None),
     if token:
         payload = auth_lib.parse_token(token)
         if payload:
-            return Principal(payload.get("uid"), payload.get("role", "user"))
+            uid = payload.get("uid")
+            # Revalida contra el estado ACTUAL del usuario en la BD en vez de confiar
+            # ciegamente en el payload firmado: sin esto, rechazar/banear a un usuario
+            # no revocaba los tokens que ya tenía emitidos (hasta AUTH_TOKEN_TTL_HOURS
+            # de acceso residual — 168h por defecto), ni un cambio de rol surtía efecto
+            # hasta que el token expirara por sí solo.
+            if users_repo.is_enabled():
+                u = users_repo.get_by_id(uid)
+                if not u or u.get("status") != "approved":
+                    raise HTTPException(
+                        401, "Sesión inválida: tu cuenta ya no está activa. Inicia sesión de nuevo.")
+                return Principal(uid, u.get("role", "user"), email=u.get("email"), name=u.get("name"))
+            # Sin BD de usuarios configurada no hay estado que revalidar: confía en el token.
+            return Principal(uid, payload.get("role", "user"))
     raise HTTPException(401, "No autenticado. Inicia sesión.")
 
 
@@ -1329,12 +1342,18 @@ ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS pause_requested boolean NOT
 """
 
 
+class RunMigrationsRequest(BaseModel):
+    db_password: str = Field(..., description="Contraseña de BD de Supabase")
+
+
 @app.post("/admin/migrate")
-def run_migrations(db_password: str = Query(..., description="Contraseña de BD de Supabase"),
+def run_migrations(body: RunMigrationsRequest,
                    p: Principal = Depends(get_principal)):
-    """Aplica migraciones pendientes (solo admin). Requiere db_password=<contraseña de BD>."""
+    """Aplica migraciones pendientes (solo admin). Requiere db_password en el body (no en la URL:
+    los parámetros de query quedan en logs de acceso de proxies/hosting en texto plano)."""
     if not p.is_admin:
         raise HTTPException(403, "Solo administradores.")
+    db_password = body.db_password
     try:
         import psycopg2
     except ImportError:

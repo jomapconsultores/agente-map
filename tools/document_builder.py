@@ -69,6 +69,215 @@ def text_stats(text: str, format_spec: dict) -> dict:
     }
 
 
+_HEADING_RE = re.compile(r"^\s*(?:#{1,6}\s+|\d+[.)]\s+)?(.+?)\s*$")
+
+
+def _extract_headings(text: str) -> list[str]:
+    """Extrae candidatos a título de sección: líneas '# Encabezado', numeradas
+    ('1. Introducción') o líneas cortas todo-mayúsculas (encabezados sin Markdown)."""
+    out = []
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if not s or len(s) > 120:
+            continue
+        if s.startswith("#"):
+            out.append(s.lstrip("#").strip())
+        elif re.match(r"^\d+[.)]\s+\S", s):
+            out.append(re.sub(r"^\d+[.)]\s+", "", s).strip())
+        elif s.isupper() and len(s.split()) <= 10 and len(s) > 3:
+            out.append(s.strip())
+    return out
+
+
+def _normalize_heading(s: str) -> str:
+    import unicodedata
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"[^a-z0-9 ]", " ", s.lower())
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def section_coverage(text: str, sections: list, threshold: float = 0.78) -> dict:
+    """Verificación MECÁNICA (no-LLM) de que cada sección obligatoria del brief
+    realmente aparece como encabezado en el documento — en vez de confiar en que
+    el mismo LLM auditado afirme que sí. Fuzzy-match tolerante a variaciones de
+    redacción ("Marco lógico" ~ "4. Marco Lógico del Proyecto").
+
+    Devuelve {"covered": [...], "missing": [...], "coverage_ratio": float}.
+    """
+    import difflib
+    headings = [_normalize_heading(h) for h in _extract_headings(text)]
+    covered, missing = [], []
+    for sec in (sections or []):
+        target = _normalize_heading(sec)
+        if not target:
+            continue
+        best = max((difflib.SequenceMatcher(None, target, h).ratio() for h in headings), default=0.0)
+        # Coincidencia también si el título de sección aparece como substring
+        # (encabezados largos tipo "4. Marco Lógico del Proyecto y Resultados").
+        substr_hit = any(target in h or h in target for h in headings if len(h) > 3)
+        if best >= threshold or substr_hit:
+            covered.append(sec)
+        else:
+            missing.append(sec)
+    total = len(covered) + len(missing)
+    return {
+        "covered": covered,
+        "missing": missing,
+        "coverage_ratio": (len(covered) / total) if total else 1.0,
+    }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  VERIFICACIÓN MECÁNICA DE CITAS Y REFERENCIAS
+# ════════════════════════════════════════════════════════════════════════════
+# El fallo de calidad más grave en un documento académico es una cita o referencia
+# inventada. Hasta ahora la única defensa era que el mismo LLM auditor "se diera
+# cuenta" leyendo el texto. Esto cierra ese punto ciego con un chequeo estructural
+# determinista: ¿cada cita del cuerpo tiene una entrada real en la bibliografía?
+# ¿cada referencia listada se usa realmente?
+_REF_HEADING_RE = re.compile(r"^#{0,6}\s*(referencias|bibliograf[ií]a|references|bibliography)\b",
+                             re.IGNORECASE)
+_APA_MULTI_PAREN_RE = re.compile(r"\(([^()]*\d{4}[a-z]?[^()]*)\)")
+_NUMERIC_CITE_RE = re.compile(r"\[(\d+(?:\s*[-,]\s*\d+)*)\]")
+
+
+def _split_references_section(text: str) -> tuple[str, str]:
+    """(cuerpo, sección_de_referencias). Si no hay encabezado de Referencias/
+    Bibliografía, sección_de_referencias es ''."""
+    lines = (text or "").splitlines()
+    idx = next((i for i, l in enumerate(lines) if _REF_HEADING_RE.match(l.strip())), None)
+    if idx is None:
+        return text, ""
+    return "\n".join(lines[:idx]), "\n".join(lines[idx + 1:])
+
+
+def _extract_apa_citations(body: str) -> list[str]:
+    """Claves 'autor_año' normalizadas de citas estilo APA/autor-fecha en el cuerpo."""
+    out = []
+    for m in _APA_MULTI_PAREN_RE.finditer(body):
+        for part in m.group(1).split(";"):
+            ym = re.search(r"(\d{4}[a-z]?)", part)
+            if not ym:
+                continue
+            author = part[:ym.start()].strip(" ,")
+            # Quitar "et al."/"&"/"y"/"and coautor": nos quedamos solo con el primer
+            # apellido, igual que el lado de la referencia (que toma el texto antes
+            # de la primera coma) — si no, "Gomez et al., 2019" y "Gomez, A. et al.
+            # (2019)" generan claves distintas y se marca un falso huérfano.
+            author = re.split(r"\bet\s*al\.?\b|&|\by\b|\band\b", author)[0].strip(" ,.")
+            key = (_normalize_heading(author) + "_" + ym.group(1)).strip("_")
+            if key:
+                out.append(key)
+    return out
+
+
+def _extract_numeric_citations(body: str) -> set:
+    nums = set()
+    for m in _NUMERIC_CITE_RE.finditer(body):
+        for chunk in m.group(1).split(","):
+            chunk = chunk.strip()
+            if "-" in chunk:
+                a, b = chunk.split("-", 1)
+                if a.strip().isdigit() and b.strip().isdigit():
+                    nums.update(range(int(a), int(b) + 1))
+            elif chunk.isdigit():
+                nums.add(int(chunk))
+    return nums
+
+
+_REF_BULLET_RE = re.compile(r"^\s*(?:[-*•]\s+|\d+[.)]\s+)")
+
+
+def _parse_reference_entries(ref_section: str) -> list:
+    """Cada referencia se trata como una entrada. Si la lista viene con viñetas o
+    numeración (lo más común en el Markdown que produce el redactor), cada línea
+    con marcador es una entrada nueva y las líneas sin marcador se anexan a la
+    anterior (referencia envuelta en varias líneas). Si no hay marcadores, separa
+    por línea en blanco entre bloques."""
+    raw_lines = [l for l in ref_section.splitlines() if l.strip()]
+    has_bullets = any(_REF_BULLET_RE.match(l) for l in raw_lines)
+
+    entries: list[str] = []
+    if has_bullets:
+        current = None
+        for line in raw_lines:
+            if _REF_BULLET_RE.match(line):
+                if current is not None:
+                    entries.append(current)
+                current = _REF_BULLET_RE.sub("", line).strip()
+            elif current is not None:
+                current += " " + line.strip()
+            else:
+                current = line.strip()
+        if current is not None:
+            entries.append(current)
+    else:
+        current_block: list[str] = []
+        for line in ref_section.splitlines() + [""]:
+            s = line.strip()
+            if not s:
+                if current_block:
+                    entries.append(" ".join(current_block))
+                    current_block = []
+                continue
+            current_block.append(s)
+
+    parsed = []
+    for e in entries:
+        ym = re.search(r"\((\d{4}[a-z]?)\)|,\s*(\d{4}[a-z]?)\b", e)
+        year = (ym.group(1) or ym.group(2)) if ym else ""
+        author = e.split(",")[0].split("(")[0].strip() if e else ""
+        doi_m = re.search(r"10\.\d{4,9}/\S+", e)
+        url_m = re.search(r"https?://\S+", e)
+        key = (_normalize_heading(author) + "_" + year).strip("_")
+        parsed.append({
+            "raw": e, "key": key,
+            "doi": doi_m.group(0).rstrip(".,)") if doi_m else None,
+            "url": url_m.group(0).rstrip(".,)") if url_m else None,
+        })
+    return parsed
+
+
+def citation_stats(text: str, citation_style: str = "") -> dict:
+    """Devuelve {has_references_section, n_references, n_citations,
+    orphan_citations, unused_references, links_to_verify}. Sin sección de
+    referencias detectada, devuelve has_references_section=False sin penalizar
+    (puede ser un tipo de documento sin bibliografía)."""
+    body, ref_section = _split_references_section(text)
+    if not ref_section.strip():
+        return {"has_references_section": False, "n_references": 0, "n_citations": 0,
+                "orphan_citations": [], "unused_references": [], "links_to_verify": []}
+
+    entries = _parse_reference_entries(ref_section)
+    ref_keys = {e["key"] for e in entries if e["key"]}
+    style = (citation_style or "").lower()
+    numeric = any(k in style for k in ("vancouver", "ieee", "numer"))
+
+    if numeric:
+        cited = _extract_numeric_citations(body)
+        n_refs = len(entries)
+        orphan = [f"[{n}]" for n in sorted(cited) if n < 1 or n > n_refs]
+        used = {n for n in cited if 1 <= n <= n_refs}
+        unused = [entries[i - 1]["raw"][:80] for i in range(1, n_refs + 1) if i not in used]
+        n_citations = len(cited)
+    else:
+        cited_keys = _extract_apa_citations(body)
+        n_citations = len(cited_keys)
+        orphan = sorted({k for k in cited_keys if k and k not in ref_keys})
+        cited_set = set(cited_keys)
+        unused = [e["raw"][:80] for e in entries if e["key"] and e["key"] not in cited_set]
+
+    links = [{"doi": e["doi"], "url": e["url"]} for e in entries if e["doi"] or e["url"]]
+    return {
+        "has_references_section": True,
+        "n_references": len(entries),
+        "n_citations": n_citations,
+        "orphan_citations": orphan,
+        "unused_references": unused,
+        "links_to_verify": links,
+    }
+
+
 # ════════════════════════════════════════════════════════════════════════════
 #  CÁLCULOS COMPARTIDOS (fuente de verdad para Word y Excel)
 # ════════════════════════════════════════════════════════════════════════════
@@ -118,8 +327,9 @@ def _add_runs_with_bold(paragraph, text):
 
 
 def _is_table_row(line: str) -> bool:
-    s = line.strip()
-    return s.startswith("|") and s.count("|") >= 2
+    # GFM permite tablas sin pipe de apertura/cierre ("Categoría | Actividad | Total").
+    # No exigir pipe inicial: homologado con el criterio ya usado en build_pdf.
+    return line.strip().count("|") >= 2
 
 
 def _is_separator_row(line: str) -> bool:
@@ -130,6 +340,36 @@ def _is_separator_row(line: str) -> bool:
 def _split_table_row(line: str):
     cells = line.strip().strip("|").split("|")
     return [c.strip() for c in cells]
+
+
+def _set_rfonts(rpr, font_name: str) -> None:
+    """Fija w:rFonts (ascii/hAnsi/eastAsia/cs) en un <w:rPr>: font.name de
+    python-docx a veces no basta para que Word aplique la fuente a todos los
+    scripts/runs — sobre todo en estilos, no solo en runs sueltos."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    rFonts = rpr.find(qn("w:rFonts"))
+    if rFonts is None:
+        rFonts = OxmlElement("w:rFonts")
+        rpr.insert(0, rFonts)
+    for tag in ("w:ascii", "w:hAnsi", "w:eastAsia", "w:cs"):
+        rFonts.set(qn(tag), font_name)
+
+
+def _set_style_font(style, font_name: str, font_size_pt: float | None = None) -> None:
+    from docx.shared import Pt
+    style.font.name = font_name
+    if font_size_pt is not None:
+        style.font.size = Pt(font_size_pt)
+    _set_rfonts(style.element.get_or_add_rPr(), font_name)
+
+
+def _set_run_font(run, font_name: str, font_size_pt: float | None = None) -> None:
+    from docx.shared import Pt
+    run.font.name = font_name
+    if font_size_pt is not None:
+        run.font.size = Pt(font_size_pt)
+    _set_rfonts(run._element.get_or_add_rPr(), font_name)
 
 
 def build_word(proposal_md: str, brief, financial, excel_filename: str, out_path: Path):
@@ -150,13 +390,21 @@ def build_word(proposal_md: str, brief, financial, excel_filename: str, out_path
 
     # ── Estilo base (aplica el formato exigido a TODO el documento) ───────
     normal = doc.styles["Normal"]
-    normal.font.name = font_name
-    normal.font.size = Pt(font_size)
+    _set_style_font(normal, font_name, font_size)
     pf = normal.paragraph_format
     pf.line_spacing_rule = WD_LINE_SPACING.SINGLE
     pf.line_spacing = line_spacing
     if justify:
         pf.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    # Encabezados y título: mismo tipo de letra exigido (python-docx los deja en
+    # la fuente de tema por defecto si no se tocan explícitamente — no heredan
+    # de "Normal"). El tamaño conserva la jerarquía visual, no se iguala al cuerpo.
+    for style_name in ("Title", "Heading 1", "Heading 2", "Heading 3", "Heading 4"):
+        try:
+            _set_style_font(doc.styles[style_name], font_name)
+        except KeyError:
+            pass
 
     # Márgenes
     for section in doc.sections:
@@ -205,7 +453,7 @@ def build_word(proposal_md: str, brief, financial, excel_filename: str, out_path
             while i < len(lines) and _is_table_row(lines[i]):
                 table_lines.append(lines[i])
                 i += 1
-            _render_md_table(doc, table_lines)
+            _render_md_table(doc, table_lines, font_name, font_size)
             continue
 
         # Encabezados
@@ -262,8 +510,10 @@ def build_word(proposal_md: str, brief, financial, excel_filename: str, out_path
         tbl = doc.add_table(rows=1, cols=2)
         tbl.style = "Light Grid Accent 1"
         hdr = tbl.rows[0].cells
-        hdr[0].paragraphs[0].add_run("Concepto").bold = True
-        hdr[1].paragraphs[0].add_run("Monto").bold = True
+        h0 = hdr[0].paragraphs[0].add_run("Concepto"); h0.bold = True
+        h1 = hdr[1].paragraphs[0].add_run("Monto"); h1.bold = True
+        _set_run_font(h0, font_name, font_size)
+        _set_run_font(h1, font_name, font_size)
         rows = [
             ("Solicitado al financiador", _money(t["total_solicitado"], cur)),
             ("Contraparte / cofinanciamiento", _money(t["total_contraparte"], cur)),
@@ -271,8 +521,10 @@ def build_word(proposal_md: str, brief, financial, excel_filename: str, out_path
         ]
         for concept, amount in rows:
             cells = tbl.add_row().cells
-            cells[0].text = concept
-            cells[1].text = amount
+            cells[0].text = ""
+            cells[1].text = ""
+            _set_run_font(cells[0].paragraphs[0].add_run(concept), font_name, font_size)
+            _set_run_font(cells[1].paragraphs[0].add_run(amount), font_name, font_size)
 
         if financial.cofinancing_notes:
             doc.add_paragraph(financial.cofinancing_notes).italic = True
@@ -282,7 +534,7 @@ def build_word(proposal_md: str, brief, financial, excel_filename: str, out_path
     return str(out_path)
 
 
-def _render_md_table(doc, table_lines):
+def _render_md_table(doc, table_lines, font_name: str | None = None, font_size: float | None = None):
     rows = [_split_table_row(l) for l in table_lines if not _is_separator_row(l)]
     if not rows:
         return
@@ -301,6 +553,11 @@ def _render_md_table(doc, table_lines):
             run = para.add_run(val)
             if ridx == 0:
                 run.bold = True
+            if font_name:
+                # El estilo de tabla ("Light Grid Accent 1") puede traer su propia
+                # fuente de tema, que pisaría la exigida por el financiador si no
+                # se fuerza explícitamente en cada run.
+                _set_run_font(run, font_name, font_size)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -707,12 +964,19 @@ def build_pdf(content_md: str, title: str, out_path: Path, subtitle: str = ""):
         ncol = max(len(r) for r in rows)
         avail = pdf.w - pdf.l_margin - pdf.r_margin
         w = avail / ncol
+        line_h = 5.2
         for ri, r in enumerate(rows):
             pdf.set_font("Helvetica", "B" if ri == 0 else "", 8.5)
-            for ci in range(ncol):
-                txt = _pdf_text(r[ci] if ci < len(r) else "")
-                pdf.cell(w, 6, txt[: max(8, int(w / 1.7))], 1)
-            pdf.ln(6)
+            cells_txt = [_pdf_text(r[ci] if ci < len(r) else "") for ci in range(ncol)]
+            # multi_cell ajusta línea (wrap) en vez de truncar por conteo de
+            # caracteres: una celda larga ya no pierde contenido silenciosamente.
+            x0, y0 = pdf.get_x(), pdf.get_y()
+            max_y = y0
+            for ci, txt in enumerate(cells_txt):
+                pdf.set_xy(x0 + ci * w, y0)
+                pdf.multi_cell(w, line_h, txt, border=1, new_x=XPos.LEFT, new_y=YPos.TOP)
+                max_y = max(max_y, pdf.get_y())
+            pdf.set_xy(x0, max_y)
         pdf.ln(2)
 
     for raw in (content_md or "").split("\n"):

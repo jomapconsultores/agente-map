@@ -21,6 +21,10 @@ _MESES_ES = {
     "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12,
     "jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
     "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12,
+    # Nombres completos en inglés (no solo abreviaturas de 3 letras): sin esto,
+    # "March 31, 2026" — el propio ejemplo del docstring de _MESDY_RE — no se reconocía.
+    "january":1,"february":2,"march":3,"april":4,"june":6,
+    "july":7,"august":8,"september":9,"october":10,"november":11,"december":12,
 }
 
 _ISO_RE   = re.compile(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})")
@@ -116,19 +120,23 @@ def _search_deadline_in_page(url: str) -> Optional[date]:
         if not content:
             return None
 
-        # Buscar patrones de fecha cerca de palabras clave de cierre
+        # Buscar patrones de fecha cerca de palabras clave de CIERRE de postulación.
+        # "plazo" a secas es demasiado genérico (coincide con "plazo de ejecución",
+        # que es la duración del proyecto, no el cierre de la convocatoria).
         keywords = [
-            "fecha de cierre", "fecha límite", "plazo", "deadline",
-            "closing date", "fecha de presentación", "hasta el", "recepción",
-            "convocatoria cierra", "postulaciones hasta",
+            "fecha de cierre", "fecha límite", "plazo de presentación",
+            "plazo de postulación", "deadline", "closing date",
+            "fecha de presentación", "hasta el", "recepción de propuestas",
+            "convocatoria cierra", "postulaciones hasta", "application deadline",
         ]
         content_lower = content.lower()
         for kw in keywords:
             idx = content_lower.find(kw)
             if idx == -1:
                 continue
-            # Buscar fecha en los 200 chars siguientes
-            fragment = content[idx: idx + 200]
+            # La fecha puede preceder a la keyword ("31 de marzo... es la fecha
+            # límite") o seguirla — buscar en ambas direcciones, no solo hacia adelante.
+            fragment = content[max(0, idx - 100): idx + 200]
             d = parse_deadline_text(fragment)
             if d:
                 return d
@@ -169,8 +177,12 @@ def verify_deadline(funder_url: str, llm_deadline_text: str) -> dict:
         except Exception:
             dl_web = None
 
-    # 3. Preferir fecha web si es posterior (más actualizada) o si el LLM no tenía
-    if dl_web and (dl_llm is None or dl_web >= dl_llm):
+    # 3. La fecha de la página oficial, recién descargada, es la fuente de verdad:
+    #    se prefiere SIEMPRE que exista, sin importar si es anterior o posterior a
+    #    la del LLM. Preferir la más tardía ("optimista") escondía silenciosamente
+    #    casos reales de convocatorias que acortaron su plazo.
+    discrepancia = bool(dl_web and dl_llm and dl_web != dl_llm)
+    if dl_web:
         dl_final = dl_web
         fuente = "web"
     elif dl_llm:
@@ -185,5 +197,7 @@ def verify_deadline(funder_url: str, llm_deadline_text: str) -> dict:
         "deadline_text": dl_final.strftime("%d/%m/%Y") if dl_final else (llm_deadline_text or "A determinar"),
         "deadline_iso": dl_final.isoformat() if dl_final else None,
         "fuente": fuente,
+        "discrepancia": discrepancia,
+        "deadline_llm_iso": dl_llm.isoformat() if dl_llm else None,
         **st,
     }

@@ -143,6 +143,18 @@ CORRECCIONES DEL REVISOR (CICLO {cycle} — APLICA TODAS con precisión quirúrg
 Mantén lo que ya estaba bien y eleva los puntos débiles por encima del 90%.
 """
 
+    quality_notes_block = ""
+    notes = getattr(session, "quality_notes", None) or []
+    if notes:
+        nlist = "\n".join(f"  - {n}" for n in notes)
+        quality_notes_block = f"""
+═══════════════════════════════════════════════════════════
+OBSERVACIONES DE AUDITORÍAS PREVIAS (no bloqueantes — auditorías que igual aprobaron
+pero con matices; elévalas también, no solo lo que fue rechazado)
+═══════════════════════════════════════════════════════════
+{nlist}
+"""
+
     return f"""
 Produce el siguiente entregable al MÁS ALTO NIVEL.
 
@@ -150,6 +162,7 @@ TIPO DE DOCUMENTO: {dt.name}
 TÍTULO: {brief.title}
 IDIOMA: {brief.language}
 EXIGENCIA DE RIGOR: {brief.rigor_notes}
+{f"NIVEL ACADÉMICO REAL: {brief.academic_level} — ajusta profundidad teórica, originalidad y extensión a ESTE nivel exacto, no a un piso genérico." if getattr(brief, 'academic_level', '') and brief.doc_type_key == 'tesis' else ""}
 
 ═══════════════════════════════════════════════════════════
 PERFILES DE EXPERTO QUE DEBES ENCARNAR
@@ -193,7 +206,7 @@ MARCAS DE EXCELENCIA (lo que eleva este documento)
 
 FUENTES REALES DISPONIBLES (úsalas; no inventes otras):
 {_clip(brief.source_notes, 2500) or "  - Usa fuentes reales y verificables del área."}
-{intake_block}{empresas_block}{template_block}{support_block}{budget_block}{corrections_block}
+{intake_block}{empresas_block}{template_block}{support_block}{budget_block}{corrections_block}{quality_notes_block}
 ═══════════════════════════════════════════════════════════
 INSTRUCCIÓN FINAL
 ═══════════════════════════════════════════════════════════
@@ -202,6 +215,215 @@ límites de extensión. Usa datos REALES de las organizaciones disponibles; no i
 RUC, representante legal ni datos de CVs. Cubre TODOS los campos del formulario/plantilla.
 Será verificado con calificación mínima de 90% por elemento y 90% global. Hazlo impecable.
 """
+
+
+_SELF_CRITIQUE_SYSTEM = """
+Eres el mismo redactor de élite, ahora en modo autocrítico exigente: revisas tu propio borrador
+contra las marcas de excelencia y los criterios con los que un auditor externo lo va a calificar,
+ANTES de que ese auditor lo vea. Identificas con precisión qué está débil — no genéricamente,
+sino en qué sección o párrafo — y lo reescribes de verdad, no lo retocas a medias. Mantienes
+intacto todo lo que ya está sólido; nunca acortas el documento ni omites secciones existentes.
+"""
+
+
+def _self_critique_and_revise(draft: str, brief: DocumentBrief, provider: str, api_key: str) -> str:
+    """Segunda pasada dentro del mismo ciclo: el propio redactor audita su borrador
+    contra quality_markers/evaluation_criteria y reescribe lo débil ANTES de exponerlo
+    al gate externo, en vez de depender solo del ciclo completo
+    redacción→gate→rechazo→reintento total para cada mejora."""
+    from agents import llm
+    from models.doc_types import get_doc_type
+    markers = "\n".join(f"  - {m}" for m in (brief.quality_markers or [])) or "  - (ninguno específico registrado)"
+    criteria = "\n".join(f"  - {c}" for c in (brief.evaluation_criteria or [])) or "  - (ninguno específico registrado)"
+    dt_name = get_doc_type(brief.doc_type_key).name
+
+    prompt = f"""
+Este es tu propio borrador para "{brief.title}" ({dt_name}).
+
+MARCAS DE EXCELENCIA A CUMPLIR:
+{markers}
+
+CRITERIOS CON LOS QUE UN AUDITOR EXTERNO TE VA A CALIFICAR (cada uno debe superar 90+/100):
+{criteria}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BORRADOR:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{draft}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Primero escribe una línea "DIAGNÓSTICO:" con 2-4 frases señalando qué marcadores/criterios están
+débiles y en qué sección o párrafo exacto. Luego, en la siguiente línea escribe exactamente
+"---VERSIÓN REVISADA---" y a continuación el documento COMPLETO reescrito, corrigiendo esos
+puntos débiles y conservando intacto lo que ya era sólido. No acortes el documento ni omitas
+ninguna sección ya presente en el borrador.
+"""
+    try:
+        raw, _used = llm.complete_builder(
+            provider, system=_SELF_CRITIQUE_SYSTEM, prompt=prompt,
+            max_tokens=MAX_TOKENS_WRITER, anthropic_key=api_key,
+        )
+        marker = "---VERSIÓN REVISADA---"
+        if marker in raw:
+            revised = raw.split(marker, 1)[1].strip()
+            # Salvaguarda: si la "revisión" viene sospechosamente más corta que el
+            # borrador original, es más probable un recorte por límite de tokens que
+            # una mejora real — mejor conservar el borrador que perder contenido.
+            if len(revised) >= len(draft) * 0.6:
+                return revised
+        return draft
+    except Exception:
+        return draft  # fail-open: si la autocrítica falla, se conserva el borrador original
+
+
+_ARCHITECTURE_SYSTEM = """
+Eres el mismo redactor de élite, ahora en modo arquitecto: antes de escribir una palabra del
+documento final, diseñas su estructura completa sección por sección, con la extensión objetivo de
+cada una, de modo que la suma cubra con holgura la extensión mínima exigida y la argumentación
+tenga arquitectura de punta a punta. Respondes ÚNICAMENTE con el JSON pedido.
+"""
+
+
+def _build_architecture_prompt(brief: DocumentBrief, min_words: int) -> str:
+    from models.doc_types import get_doc_type
+    sections_str = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(brief.sections))
+    return f"""
+Diseña la ARQUITECTURA COMPLETA de "{brief.title}" ({get_doc_type(brief.doc_type_key).name}),
+en {brief.language}, con extensión TOTAL objetivo de AL MENOS {min_words} palabras.
+
+SECCIONES A CUBRIR (base; ajusta el desglose si el tipo de documento lo justifica):
+{sections_str}
+
+QUÉ DEBE CONTENER (brief del investigador/clasificador):
+{_clip(brief.instructions, 3000)}
+
+Responde ÚNICAMENTE con este JSON:
+{{
+  "sections": [
+    {{"title": "<título exacto de la sección>", "target_words": <int>,
+      "key_points": ["<punto clave a desarrollar 1>", "<punto 2>", "<punto 3>"]}}
+  ]
+}}
+La suma de target_words debe ser AL MENOS {min_words} y distribuirse con criterio real (secciones
+como Metodología/Resultados/Discusión/Marco teórico llevan más peso que Agradecimientos/Anexos).
+"""
+
+
+def _build_section_prompt(brief: DocumentBrief, plan: list, idx: int,
+                          written_summary: list, corrections: list) -> str:
+    from models.doc_types import FormatSpec
+    fmt = FormatSpec.from_dict(brief.format_spec)
+    sec = plan[idx]
+    outline = "\n".join(f"  {j+1}. {s['title']} (~{s.get('target_words', 0)} palabras)"
+                        for j, s in enumerate(plan))
+    key_points = "\n".join(f"  - {k}" for k in (sec.get("key_points") or [])) \
+        or "  - (usa tu criterio experto según el brief)"
+    written_block = "\n".join(f"  - {t}: {s}" for t, s in written_summary) \
+        or "  (esta es la primera sección — no hay nada escrito todavía)"
+    corrections_block = ""
+    if corrections:
+        clist = "\n".join(f"  {i+1}. {c}" for i, c in enumerate(corrections))
+        corrections_block = f"\nCORRECCIONES DEL REVISOR A APLICAR SI CORRESPONDEN A ESTA SECCIÓN:\n{clist}\n"
+
+    return f"""
+Estás redactando el documento COMPLETO "{brief.title}" por SECCIONES, siguiendo una arquitectura
+ya definida (esto es necesario porque el documento completo excede lo que cabe en una sola
+llamada). Ahora escribe ÚNICAMENTE la sección {idx + 1} de {len(plan)}: "{sec['title']}"
+— objetivo: ~{sec.get('target_words', 0)} palabras.
+
+PLAN COMPLETO DEL DOCUMENTO (para que tu sección encaje sin repetir lo que cubren las demás):
+{outline}
+
+PUNTOS CLAVE A DESARROLLAR EN ESTA SECCIÓN:
+{key_points}
+
+RESUMEN DE LO YA ESCRITO (continuidad y coherencia — no lo repitas, constrúyelo sobre esto):
+{written_block}
+{corrections_block}
+FORMATO EXIGIDO: {fmt.to_prompt()}
+IDIOMA: {brief.language}
+
+INSTRUCCIÓN: Escribe SOLO el contenido de esta sección en Markdown limpio, empezando con un
+encabezado "## {sec['title']}". No repitas el título del documento completo ni escribas
+contenido de otras secciones del plan. Apunta a {sec.get('target_words', 0)} palabras (±20%),
+con densidad de contenido real y verificable — nunca relleno.
+"""
+
+
+def _section_summary(text: str, n: int = 220) -> str:
+    """Resumen barato (sin LLM) de una sección ya escrita, solo para dar orientación
+    de continuidad a la siguiente sección — no para juzgar calidad."""
+    import re as _re
+    plain = _re.sub(r"[#*_`>|-]+", " ", text or "")
+    plain = _re.sub(r"\s+", " ", plain).strip()
+    return (plain[:n] + "…") if len(plain) > n else plain
+
+
+def _run_multipass(session: ProjectSession, corrections: list, api_key: str,
+                   provider: str, min_words: int) -> str:
+    """Genera el documento en 3 pasadas cuando excede lo que cabe en una sola
+    llamada: (A) arquitectura — plan sección por sección; (B) contenido — cada
+    sección con su PROPIO presupuesto completo de MAX_TOKENS_WRITER, sin competir
+    por un único techo global; (C) ensamblado — unión ordenada con limpieza
+    estructural determinista (sin una llamada final que deba re-emitir el
+    documento completo: para 25k+ palabras esa llamada volvería a truncar,
+    exactamente el problema que esta función existe para evitar).
+    """
+    from agents import llm
+    brief = session.brief
+    cycle = session.current_cycle
+
+    # ── (A) Arquitectura ──────────────────────────────────────────────────────
+    arch_prompt = _build_architecture_prompt(brief, min_words)
+    plan: list = []
+    try:
+        raw_plan, used = llm.complete_builder(
+            provider, system=_ARCHITECTURE_SYSTEM, prompt=arch_prompt,
+            max_tokens=3000, anthropic_key=api_key, temperature=0.3,
+        )
+        from utils.json_utils import robust_json_loads
+        data = robust_json_loads(raw_plan)
+        plan = [s for s in (data.get("sections") or []) if isinstance(s, dict) and s.get("title")]
+        session.builder_log.append({"cycle": cycle, "stage": "multipass_architecture",
+                                    "requested": provider, "used": used, "n_sections": len(plan)})
+    except Exception:
+        plan = []
+
+    if not plan:
+        # La planificación falló: cae al camino de una sola llamada en vez de
+        # bloquear el pipeline por una mejora que es best-effort.
+        prompt = _build_prompt(brief, session, corrections, cycle)
+        text, used = llm.complete_builder(
+            provider, system=SYSTEM_PROMPT, prompt=prompt,
+            max_tokens=MAX_TOKENS_WRITER, anthropic_key=api_key,
+        )
+        session.builder_log.append({"cycle": cycle, "requested": provider, "used": used,
+                                    "note": "multipass_fallback_single_call"})
+        return text
+
+    # ── (B) Contenido — una llamada POR SECCIÓN, cada una con su propio techo ──
+    written_summary: list[tuple[str, str]] = []
+    section_texts: list[str] = []
+    for idx, sec in enumerate(plan):
+        sec_prompt = _build_section_prompt(brief, plan, idx, written_summary, corrections)
+        try:
+            sec_text, used = llm.complete_builder(
+                provider, system=SYSTEM_PROMPT, prompt=sec_prompt,
+                max_tokens=MAX_TOKENS_WRITER, anthropic_key=api_key,
+            )
+        except Exception as ex:
+            sec_text = f"## {sec['title']}\n\n[Sección no generada por error técnico: {ex}]"
+            used = "error"
+        section_texts.append(sec_text.strip())
+        written_summary.append((sec["title"], _section_summary(sec_text)))
+        session.builder_log.append({"cycle": cycle, "stage": f"multipass_section_{idx+1}",
+                                    "requested": provider, "used": used})
+
+    # ── (C) Ensamblado — unión ordenada + limpieza estructural determinista ────
+    # Sin llamada LLM que re-emita el documento entero: para un texto de 25k+
+    # palabras esa llamada volvería a truncar, el mismo problema que se evita.
+    text = "\n\n".join(section_texts)
+    return text
 
 
 def run(session: ProjectSession, corrections: list, api_key: str,
@@ -215,10 +437,21 @@ def run(session: ProjectSession, corrections: list, api_key: str,
     brief = session.brief
     cycle = session.current_cycle
     provider = provider or config.builder_for_cycle(cycle)
-    prompt = _build_prompt(brief, session, corrections, cycle)
-    text, used = llm.complete_builder(
-        provider, system=SYSTEM_PROMPT, prompt=prompt,
-        max_tokens=MAX_TOKENS_WRITER, anthropic_key=api_key,
-    )
-    session.builder_log.append({"cycle": cycle, "requested": provider, "used": used})
+
+    min_words = int((brief.format_spec or {}).get("min_words") or 0)
+    if min_words >= config.MULTIPASS_MIN_WORDS:
+        text = _run_multipass(session, corrections, api_key, provider, min_words)
+    else:
+        prompt = _build_prompt(brief, session, corrections, cycle)
+        text, used = llm.complete_builder(
+            provider, system=SYSTEM_PROMPT, prompt=prompt,
+            max_tokens=MAX_TOKENS_WRITER, anthropic_key=api_key,
+        )
+        session.builder_log.append({"cycle": cycle, "requested": provider, "used": used})
+
+    if (config.WRITER_SELF_REVIEW
+            and brief.doc_type_key in config.WRITER_SELF_REVIEW_DOC_TYPES):
+        text = _self_critique_and_revise(text, brief, provider, api_key)
+        session.builder_log.append({"cycle": cycle, "stage": "self_critique", "requested": provider})
+
     return text

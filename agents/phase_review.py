@@ -15,6 +15,7 @@ El veredicto FINAL del documento lo da Claude con la regla 90/90 estricta
 from __future__ import annotations
 
 import json
+import time
 
 import config
 from agents import llm
@@ -22,6 +23,29 @@ from models.doc_types import FormatSpec, get_doc_type
 from models.schemas import DocumentBrief
 
 MAX_TOKENS_GATE = 1500
+
+# Tipos de máxima exigencia/riesgo reputacional: si el gate técnico falla por
+# completo (proveedor caído, JSON irreparable) tras agotar reintentos, NO se
+# aprueba automáticamente (fail-open) — se rechaza (fail-closed) y el pipeline
+# reintenta, en vez de dejar pasar sin que ninguna IA haya auditado nada.
+_STRICT_FAIL_CLOSED_TYPES = {"tesis", "articulo_cientifico", "peer_review", "tdr"}
+
+
+def _complete_with_retries(provider: str, *, system: str, prompt: str,
+                           max_tokens: int, temperature: float, retries: int = 2) -> str:
+    """Reintenta con backoff corto en el MISMO proveedor antes de rendirse — un
+    fallo transitorio (timeout, rate-limit) no debe apagar de facto la auditoría
+    cruzada de calidad para toda una fase."""
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            return llm.complete(provider, system=system, prompt=prompt,
+                                max_tokens=max_tokens, temperature=temperature)
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+    raise last_err  # type: ignore[misc]
 
 _SYSTEM = """
 Eres un auditor de calidad independiente, riguroso y calibrado. Tu función es evaluar si una fase
@@ -93,8 +117,8 @@ listarlo en "critical". Devuelve SOLO el JSON.
 """
     threshold = config.PHASE_REVIEW_THRESHOLD
     try:
-        raw = llm.complete(provider, system=_SYSTEM, prompt=prompt,
-                           max_tokens=MAX_TOKENS_GATE, temperature=0.2)
+        raw = _complete_with_retries(provider, system=_SYSTEM, prompt=prompt,
+                                     max_tokens=MAX_TOKENS_GATE, temperature=0.2)
         data = _parse(raw)
         score = float(data.get("score", 0) or 0)
         critical = [str(c) for c in (data.get("critical") or [])]
@@ -107,11 +131,21 @@ listarlo en "critical". Devuelve SOLO el JSON.
             "strengths": strengths,
             "recommendation": str(data.get("recommendation", "")),
         }
-    except Exception as ex:  # un gate caído no debe tumbar el pipeline
+    except Exception as ex:  # el gate técnico falló tras agotar reintentos
+        fail_closed = brief.doc_type_key in _STRICT_FAIL_CLOSED_TYPES
+        print(f"[phase_review] GATE {'FAIL-CLOSED' if fail_closed else 'OMITIDO (fail-open)'} "
+              f"fase={phase!r} provider={provider!r} doc_type={brief.doc_type_key!r}: "
+              f"{type(ex).__name__}: {ex}")
         return {
-            "phase": phase, "provider": provider, "score": float(threshold),
-            "passed": True, "critical": [], "issues": [],
-            "strengths": [], "recommendation": f"(gate omitido: {type(ex).__name__})",
+            "phase": phase, "provider": provider,
+            "score": 0.0 if fail_closed else float(threshold),
+            "passed": not fail_closed,
+            "critical": (["Auditoría técnica no pudo ejecutarse tras reintentos — "
+                          "tipo de máxima exigencia: no se aprueba automáticamente."]
+                         if fail_closed else []),
+            "issues": [], "strengths": [],
+            "recommendation": f"(gate omitido: {type(ex).__name__} — "
+                              f"{'fail-closed' if fail_closed else 'fail-open'})",
         }
 
 
@@ -213,7 +247,7 @@ Devuelve SOLO: {_PACKAGE_JSON}
 """
     threshold = config.PHASE_REVIEW_THRESHOLD
     try:
-        raw = llm.complete(
+        raw = _complete_with_retries(
             provider, system=_PACKAGE_SYSTEM, prompt=prompt,
             max_tokens=2000, temperature=0.2,
         )
@@ -230,8 +264,17 @@ Devuelve SOLO: {_PACKAGE_JSON}
             "recommendation": str(data.get("recommendation", "")),
         }
     except Exception as ex:
+        fail_closed = brief.doc_type_key in _STRICT_FAIL_CLOSED_TYPES
+        print(f"[phase_review] GATE 3 {'FAIL-CLOSED' if fail_closed else 'OMITIDO (fail-open)'} "
+              f"provider={provider!r} doc_type={brief.doc_type_key!r}: {type(ex).__name__}: {ex}")
         return {
-            "phase": "paquete completo", "provider": provider, "score": float(threshold),
-            "passed": True, "critical": [], "issues": [],
-            "strengths": [], "recommendation": f"(gate omitido: {type(ex).__name__})",
+            "phase": "paquete completo", "provider": provider,
+            "score": 0.0 if fail_closed else float(threshold),
+            "passed": not fail_closed,
+            "critical": (["Auditoría técnica del paquete no pudo ejecutarse tras reintentos — "
+                          "tipo de máxima exigencia: no se aprueba automáticamente."]
+                         if fail_closed else []),
+            "issues": [], "strengths": [],
+            "recommendation": f"(gate omitido: {type(ex).__name__} — "
+                              f"{'fail-closed' if fail_closed else 'fail-open'})",
         }
