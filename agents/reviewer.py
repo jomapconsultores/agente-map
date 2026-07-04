@@ -349,6 +349,13 @@ def run_dual(session, proposal: str, api_key: str) -> ReviewResult:
         return result_a
 
     result_b.recommendation = f"[Segunda opinión — {config.SECOND_OPINION_PROVIDER}] {result_b.recommendation}"
+    # db.reviews tiene UNIQUE(session_id, cycle) y ambos veredictos comparten
+    # session.current_cycle por defecto — insertar los dos con el mismo cycle
+    # viola esa restricción y hace fallar save_session() al final del pipeline
+    # (marcando "failed" un documento que en realidad sí se completó). El
+    # negativo del ciclo distingue la fila de la segunda opinión sin requerir
+    # una migración de esquema (la columna es "int not null", sin CHECK > 0).
+    result_b.cycle = -result_b.cycle
     session.review_results.append(result_b)
 
     # Fusiona en result_a (que el pipeline añadirá a session.review_results como de

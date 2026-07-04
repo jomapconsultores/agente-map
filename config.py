@@ -72,9 +72,16 @@ ROLE_PACKAGE_REVIEW  = os.getenv("ROLE_PACKAGE_REVIEW",  "deepseek")
 # Se carga automáticamente como contexto para investigador y redactor.
 EMPRESAS_DIR = BASE_DIR / "Empresas"
 
-# Reinicios del ciclo completo cuando un gate reprueba (<90). Tras agotarlos se
-# entrega la mejor versión lograda marcada como inconclusa.
-MAX_PIPELINE_RESTARTS = int(os.getenv("MAX_PIPELINE_RESTARTS", "5"))
+# Reinicios del ciclo completo cuando un gate reprueba (<90, o <umbral estricto
+# del tipo de documento — ver DocType.strict_threshold). Tras agotarlos se entrega
+# la mejor versión lograda marcada como inconclusa.
+# 5→10: en pruebas reales, una tesis con umbral estricto (93/100) agotó los 5
+# ciclos sin que Gate 2 aprobara ninguna redacción — el umbral es exigente a
+# propósito, así que necesita más intentos para converger, no un umbral más
+# bajo. Como los ciclos posteriores a que Gate 1 apruebe YA NO repiten la
+# investigación (ver core/pipeline.py: research_approved), duplicar el límite
+# no duplica el costo real — solo se repiten redacción + gates, más baratos.
+MAX_PIPELINE_RESTARTS = int(os.getenv("MAX_PIPELINE_RESTARTS", "10"))
 # Umbral mínimo (0-100) que debe alcanzar cada fase en su gate intermedio.
 PHASE_REVIEW_THRESHOLD = int(os.getenv("PHASE_REVIEW_THRESHOLD", "90"))
 

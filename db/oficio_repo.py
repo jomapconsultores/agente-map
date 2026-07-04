@@ -9,7 +9,7 @@ from utils.supabase_client import get_client
 
 def save(
     *,
-    owner_user_id: str,
+    owner_user_id: Optional[str],
     entity: str,
     doc_type: str,
     subject: str,
@@ -85,13 +85,14 @@ def get_oficio(oficio_id: str) -> Optional[dict[str, Any]]:
         raise
 
 
-def delete_oficio(*, oficio_id: str, owner_user_id: str) -> bool:
+def delete_oficio(*, oficio_id: str, owner_user_id: Optional[str]) -> bool:
+    """Si owner_user_id es None (admin), no filtra por dueño — permite borrar el
+    oficio de cualquier usuario. Antes un admin que filtraba por SU PROPIO id
+    nunca podía borrar el oficio ajeno (0 filas), pero el endpoint igual
+    respondía ok:true."""
     sb = get_client(service_role=True)
-    res = (
-        sb.table("oficios")
-        .delete()
-        .eq("oficio_id", oficio_id)
-        .eq("owner_user_id", owner_user_id)
-        .execute()
-    )
+    q = sb.table("oficios").delete().eq("oficio_id", oficio_id)
+    if owner_user_id is not None:
+        q = q.eq("owner_user_id", owner_user_id)
+    res = q.execute()
     return bool(res.data)

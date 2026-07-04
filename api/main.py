@@ -1213,7 +1213,10 @@ def crear_oficio(req: OficioRequest, p: Principal = Depends(get_principal)):
 
     try:
         oficio_id = oficio_repo.save(
-            owner_user_id=p.user_id or "",
+            # p.user_id es None con la clave maestra — la columna es uuid NULLABLE
+            # (ON DELETE SET NULL); "" no es un UUID válido y hacía fallar el INSERT
+            # en silencio, dejando el oficio generado pero nunca guardado.
+            owner_user_id=p.user_id,
             entity=req.entity,
             doc_type=req.doc_type,
             subject=req.subject,
@@ -1301,45 +1304,38 @@ def descargar_oficio_pdf(oficio_id: str, p: Principal = Depends(get_principal)):
 
 @app.delete("/oficios/{oficio_id}", status_code=200)
 def eliminar_oficio(oficio_id: str, p: Principal = Depends(get_principal)):
-    """Elimina un oficio del usuario."""
+    """Elimina un oficio. Un admin puede borrar el de cualquier usuario."""
     _require_supabase()
     if not p.user_id:
         raise HTTPException(403, "Requiere cuenta de usuario.")
     from db import oficio_repo
-    ok = oficio_repo.delete_oficio(oficio_id=oficio_id, owner_user_id=p.user_id)
-    if not ok and not p.is_admin:
+    # Admin: no filtra por dueño (antes filtraba por el ID del propio admin, que
+    # nunca coincide con el oficio ajeno — 0 filas borradas pero respondía ok:true).
+    ok = oficio_repo.delete_oficio(oficio_id=oficio_id,
+                                    owner_user_id=None if p.is_admin else p.user_id)
+    if not ok:
         raise HTTPException(404, "Oficio no encontrado.")
     return {"ok": True}
 
 
 # ── Migración administrativa ─────────────────────────────────────────────────
-_MIGRATION_SQL = """
-CREATE TABLE IF NOT EXISTS public.oficios (
-    id             uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
-    oficio_id      text        NOT NULL UNIQUE,
-    owner_user_id  uuid        REFERENCES public.users(id) ON DELETE SET NULL,
-    entity         text        NOT NULL,
-    doc_type       text        NOT NULL DEFAULT 'peticion',
-    subject        text        NOT NULL,
-    requester_name text        NOT NULL,
-    requester_id   text        NOT NULL DEFAULT '',
-    requester_role text        NOT NULL DEFAULT '',
-    requester_address text     NOT NULL DEFAULT '',
-    requester_phone   text     NOT NULL DEFAULT '',
-    request_detail text        NOT NULL,
-    extra_legal    text        NOT NULL DEFAULT '',
-    extra_facts    text        NOT NULL DEFAULT '',
-    doc_number     text        NOT NULL DEFAULT '',
-    city           text        NOT NULL DEFAULT 'Cuenca',
-    content        text        NOT NULL DEFAULT '',
-    created_at     timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_oficios_owner ON public.oficios(owner_user_id);
-CREATE INDEX IF NOT EXISTS idx_oficios_created ON public.oficios(created_at DESC);
-ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS current_phase text DEFAULT '';
-ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS progress_steps jsonb DEFAULT '[]'::jsonb;
-ALTER TABLE public.sessions ADD COLUMN IF NOT EXISTS pause_requested boolean NOT NULL DEFAULT false;
-"""
+def _load_migration_sql() -> str:
+    """Concatena las migraciones numeradas reales de db/*.sql (002-009...), en vez
+    de mantener una copia a mano — la copia anterior quedó desactualizada (omitía
+    006_webauthn/008_captacion/009_resume_state), dejando /admin/migrate
+    respondiendo "ok" sin crear esas tablas/columnas en un proyecto nuevo.
+    Excluye 000_full_setup.sql (alternativa de "esquema completo desde cero para
+    un proyecto vacío", no una migración incremental) y cualquier archivo no
+    numerado (schema.sql/setup.sql, variantes de referencia)."""
+    db_dir = Path(__file__).parent.parent / "db"
+    files = sorted(
+        f for f in db_dir.glob("*.sql")
+        if f.stem[:3].isdigit() and f.stem != "000_full_setup"
+    )
+    parts = []
+    for f in files:
+        parts.append(f"-- === {f.name} ===\n" + f.read_text(encoding="utf-8"))
+    return "\n\n".join(parts)
 
 
 class RunMigrationsRequest(BaseModel):
@@ -1380,7 +1376,8 @@ def run_migrations(body: RunMigrationsRequest,
     try:
         conn.autocommit = True
         cur = conn.cursor()
-        for stmt in [s.strip() for s in _MIGRATION_SQL.split(";") if s.strip()]:
+        migration_sql = _load_migration_sql()
+        for stmt in [s.strip() for s in migration_sql.split(";") if s.strip() and not s.strip().startswith("--")]:
             try:
                 cur.execute(stmt)
             except Exception as e:
@@ -1448,7 +1445,8 @@ def buscar_mercado(req: BuscarMercadoRequest, background: BackgroundTasks,
     """Lanza búsqueda de mercado en background. Devuelve job_id para polling."""
     import threading
     job_id = str(uuid.uuid4())
-    _captacion_jobs[job_id] = {"status": "running", "result": None, "error": None}
+    _captacion_jobs[job_id] = {"status": "running", "result": None, "error": None,
+                               "owner_user_id": p.user_id, "is_admin_job": p.is_admin}
 
     def _run():
         try:
@@ -1466,9 +1464,9 @@ def buscar_mercado(req: BuscarMercadoRequest, background: BackgroundTasks,
                     owner_user_id=p.user_id,
                     producto=req.producto,
                 )
-            _captacion_jobs[job_id] = {"status": "done", "result": result, "error": None}
+            _captacion_jobs[job_id].update({"status": "done", "result": result, "error": None})
         except Exception as e:
-            _captacion_jobs[job_id] = {"status": "failed", "result": None, "error": str(e)}
+            _captacion_jobs[job_id].update({"status": "failed", "result": None, "error": str(e)})
 
     threading.Thread(target=_run, daemon=True).start()
     return {"job_id": job_id, "status": "running"}
@@ -1483,7 +1481,11 @@ def captacion_job_status(job_id: str, p: Principal = Depends(get_principal)):
     job = _captacion_jobs.get(job_id)
     if not job:
         raise HTTPException(404, "Job no encontrado.")
-    return job
+    # Sin esto, cualquier usuario autenticado que conozca/adivine un job_id ajeno
+    # podía leer los resultados de la búsqueda de mercado de otro usuario.
+    if not p.is_admin and job.get("owner_user_id") != p.user_id:
+        raise HTTPException(404, "Job no encontrado.")
+    return {k: v for k, v in job.items() if k not in ("owner_user_id", "is_admin_job")}
 
 
 # ── Prospectos ────────────────────────────────────────────────────────────────
@@ -1556,7 +1558,11 @@ def eliminar_prospecto(prospecto_id: str, p: Principal = Depends(get_principal))
     if not p.user_id:
         raise HTTPException(403, "Requiere cuenta de usuario.")
     from db import captacion_repo
-    captacion_repo.delete_prospecto(prospecto_id=prospecto_id, owner_user_id=p.user_id)
+    # delete_prospecto() ya devuelve si realmente borró algo — el endpoint lo
+    # ignoraba y siempre respondía ok:true, incluso con un id inexistente/ajeno.
+    ok = captacion_repo.delete_prospecto(prospecto_id=prospecto_id, owner_user_id=p.user_id)
+    if not ok:
+        raise HTTPException(404, "Prospecto no encontrado.")
     return {"ok": True}
 
 
@@ -1603,5 +1609,7 @@ def eliminar_cliente(cliente_id: str, p: Principal = Depends(get_principal)):
     if not p.user_id:
         raise HTTPException(403, "Requiere cuenta de usuario.")
     from db import captacion_repo
-    captacion_repo.delete_cliente(cliente_id=cliente_id, owner_user_id=p.user_id)
+    ok = captacion_repo.delete_cliente(cliente_id=cliente_id, owner_user_id=p.user_id)
+    if not ok:
+        raise HTTPException(404, "Cliente no encontrado.")
     return {"ok": True}

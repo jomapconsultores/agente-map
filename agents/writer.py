@@ -74,12 +74,17 @@ def _clip(text: str, n: int) -> str:
     return text if len(text) <= n else text[:n] + "\n[…truncado…]"
 
 
-def _build_prompt(brief: DocumentBrief, session: ProjectSession, corrections: list, cycle: int) -> str:
-    from models.doc_types import FormatSpec, get_doc_type
-    dt = get_doc_type(brief.doc_type_key)
-    fmt = FormatSpec.from_dict(brief.format_spec)
+def _build_context_blocks(brief: DocumentBrief, session: ProjectSession) -> dict:
+    """Bloques de contexto COMPARTIDOS por todo camino de redacción (una sola llamada
+    y multi-pasada): perfiles de experto, lineamientos, requisitos, marcas de calidad,
+    intake/plantilla/apoyo/presupuesto/observaciones previas.
 
-    sections_str = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(brief.sections))
+    Antes solo _build_prompt() los construía; _run_multipass() los perdía por
+    completo (nunca recibía `session`, solo campos sueltos de `brief`) — para
+    tesis/artículos largos (justo el camino normal para 15-25k+ palabras) el
+    redactor perdía los perfiles a encarnar, lineamientos, datos reales de la
+    organización y los requisitos detectados en la plantilla/bases subidas.
+    """
     personas_str = "\n".join(f"  - {p}" for p in brief.personas)
     reqs_str = "\n".join(f"  - {r}" for r in brief.key_requirements) or "  - (según el tipo de documento)"
     quality_str = "\n".join(f"  - {q}" for q in brief.quality_markers) or "  - Excelencia técnica y claridad."
@@ -132,17 +137,6 @@ Costo unitario | Solicitado/Referencial | Contraparte | Total) con números sin 
 (ej. 12500.00) cuyos subtotales y total cuadren. Se exportará a Excel con cálculos vivos.
 """
 
-    corrections_block = ""
-    if corrections:
-        clist = "\n".join(f"  {i+1}. {c}" for i, c in enumerate(corrections))
-        corrections_block = f"""
-═══════════════════════════════════════════════════════════
-CORRECCIONES DEL REVISOR (CICLO {cycle} — APLICA TODAS con precisión quirúrgica)
-═══════════════════════════════════════════════════════════
-{clist}
-Mantén lo que ya estaba bien y eleva los puntos débiles por encima del 90%.
-"""
-
     quality_notes_block = ""
     notes = getattr(session, "quality_notes", None) or []
     if notes:
@@ -153,6 +147,39 @@ OBSERVACIONES DE AUDITORÍAS PREVIAS (no bloqueantes — auditorías que igual a
 pero con matices; elévalas también, no solo lo que fue rechazado)
 ═══════════════════════════════════════════════════════════
 {nlist}
+"""
+
+    return {
+        "personas_str": personas_str, "reqs_str": reqs_str, "quality_str": quality_str,
+        "nat_str": nat_str, "intl_str": intl_str, "template_block": template_block,
+        "support_block": support_block, "intake_block": intake_block,
+        "empresas_block": empresas_block, "budget_block": budget_block,
+        "quality_notes_block": quality_notes_block,
+    }
+
+
+def _build_prompt(brief: DocumentBrief, session: ProjectSession, corrections: list, cycle: int) -> str:
+    from models.doc_types import FormatSpec, get_doc_type
+    dt = get_doc_type(brief.doc_type_key)
+    fmt = FormatSpec.from_dict(brief.format_spec)
+
+    sections_str = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(brief.sections))
+    ctx = _build_context_blocks(brief, session)
+    personas_str, reqs_str, quality_str = ctx["personas_str"], ctx["reqs_str"], ctx["quality_str"]
+    nat_str, intl_str = ctx["nat_str"], ctx["intl_str"]
+    template_block, support_block = ctx["template_block"], ctx["support_block"]
+    intake_block, empresas_block = ctx["intake_block"], ctx["empresas_block"]
+    budget_block, quality_notes_block = ctx["budget_block"], ctx["quality_notes_block"]
+
+    corrections_block = ""
+    if corrections:
+        clist = "\n".join(f"  {i+1}. {c}" for i, c in enumerate(corrections))
+        corrections_block = f"""
+═══════════════════════════════════════════════════════════
+CORRECCIONES DEL REVISOR (CICLO {cycle} — APLICA TODAS con precisión quirúrgica)
+═══════════════════════════════════════════════════════════
+{clist}
+Mantén lo que ya estaba bien y eleva los puntos débiles por encima del 90%.
 """
 
     return f"""
@@ -284,12 +311,15 @@ tenga arquitectura de punta a punta. Respondes ÚNICAMENTE con el JSON pedido.
 """
 
 
-def _build_architecture_prompt(brief: DocumentBrief, min_words: int) -> str:
+def _build_architecture_prompt(brief: DocumentBrief, ctx: dict, min_words: int) -> str:
     from models.doc_types import get_doc_type
     sections_str = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(brief.sections))
     return f"""
 Diseña la ARQUITECTURA COMPLETA de "{brief.title}" ({get_doc_type(brief.doc_type_key).name}),
 en {brief.language}, con extensión TOTAL objetivo de AL MENOS {min_words} palabras.
+
+PERFILES DE EXPERTO QUE EL DOCUMENTO DEBE ENCARNAR:
+{ctx['personas_str']}
 
 SECCIONES A CUBRIR (base; ajusta el desglose si el tipo de documento lo justifica):
 {sections_str}
@@ -297,6 +327,13 @@ SECCIONES A CUBRIR (base; ajusta el desglose si el tipo de documento lo justific
 QUÉ DEBE CONTENER (brief del investigador/clasificador):
 {_clip(brief.instructions, 3000)}
 
+REQUISITOS CRÍTICOS QUE ALGUNA SECCIÓN DEBE CUBRIR:
+{ctx['reqs_str']}
+
+LINEAMIENTOS A CUMPLIR (nacionales e internacionales/organizacionales):
+{ctx['nat_str']}
+{ctx['intl_str']}
+{ctx['budget_block']}
 Responde ÚNICAMENTE con este JSON:
 {{
   "sections": [
@@ -309,7 +346,7 @@ como Metodología/Resultados/Discusión/Marco teórico llevan más peso que Agra
 """
 
 
-def _build_section_prompt(brief: DocumentBrief, plan: list, idx: int,
+def _build_section_prompt(brief: DocumentBrief, ctx: dict, plan: list, idx: int,
                           written_summary: list, corrections: list) -> str:
     from models.doc_types import FormatSpec
     fmt = FormatSpec.from_dict(brief.format_spec)
@@ -331,12 +368,21 @@ ya definida (esto es necesario porque el documento completo excede lo que cabe e
 llamada). Ahora escribe ÚNICAMENTE la sección {idx + 1} de {len(plan)}: "{sec['title']}"
 — objetivo: ~{sec.get('target_words', 0)} palabras.
 
+PERFILES DE EXPERTO QUE DEBES ENCARNAR:
+{ctx['personas_str']}
+
 PLAN COMPLETO DEL DOCUMENTO (para que tu sección encaje sin repetir lo que cubren las demás):
 {outline}
 
 PUNTOS CLAVE A DESARROLLAR EN ESTA SECCIÓN:
 {key_points}
 
+MARCAS DE EXCELENCIA (lo que eleva este documento):
+{ctx['quality_str']}
+
+FUENTES REALES DISPONIBLES (úsalas; no inventes otras):
+{_clip(brief.source_notes, 2000) or "  - Usa fuentes reales y verificables del área."}
+{ctx['intake_block']}{ctx['empresas_block']}{ctx['template_block']}{ctx['support_block']}{ctx['budget_block']}{ctx['quality_notes_block']}
 RESUMEN DE LO YA ESCRITO (continuidad y coherencia — no lo repitas, constrúyelo sobre esto):
 {written_block}
 {corrections_block}
@@ -345,9 +391,56 @@ IDIOMA: {brief.language}
 
 INSTRUCCIÓN: Escribe SOLO el contenido de esta sección en Markdown limpio, empezando con un
 encabezado "## {sec['title']}". No repitas el título del documento completo ni escribas
-contenido de otras secciones del plan. Apunta a {sec.get('target_words', 0)} palabras (±20%),
-con densidad de contenido real y verificable — nunca relleno.
+contenido de otras secciones del plan. Usa datos REALES de las organizaciones disponibles; no
+inventes razón social, RUC, representante legal ni datos de CVs. Apunta a {sec.get('target_words', 0)}
+palabras (±20%), con densidad de contenido real y verificable — nunca relleno.
 """
+
+
+def _self_critique_section(section_text: str, sec_title: str, brief: DocumentBrief,
+                           provider: str, api_key: str) -> str:
+    """Autocrítica ACOTADA a una sola sección — usada dentro de _run_multipass en
+    vez de _self_critique_and_revise() (que reescribe el documento COMPLETO).
+
+    _self_critique_and_revise() usa un único MAX_TOKENS_WRITER (~9000-11000
+    palabras de techo) para reescribir el documento entero; para una tesis de
+    25-45k palabras eso trunca la reescritura silenciosamente (el único resguardo,
+    largo >= 60% del original, deja pasar un recorte del 65-95%) exactamente en la
+    cola del documento (Conclusiones/Referencias/Anexos). Autocriticar sección por
+    sección mantiene el mismo presupuesto de tokens que ya usó su generación
+    original — nunca compite por reescribir más de lo que una sola sección pesa.
+    """
+    from agents import llm
+    markers = "\n".join(f"  - {m}" for m in (brief.quality_markers or [])) or "  - (ninguno específico registrado)"
+    prompt = f"""
+Esta es tu propia sección "{sec_title}" del documento "{brief.title}".
+
+MARCAS DE EXCELENCIA A CUMPLIR:
+{markers}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECCIÓN:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{section_text}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Escribe "---VERSIÓN REVISADA---" y a continuación ÚNICAMENTE esta sección reescrita, elevando lo
+débil frente a las marcas de excelencia y conservando lo que ya era sólido. No la acortes ni
+omitas contenido — solo eleva su calidad.
+"""
+    try:
+        raw, _used = llm.complete_builder(
+            provider, system=_SELF_CRITIQUE_SYSTEM, prompt=prompt,
+            max_tokens=MAX_TOKENS_WRITER, anthropic_key=api_key,
+        )
+        marker = "---VERSIÓN REVISADA---"
+        if marker in raw:
+            revised = raw.split(marker, 1)[1].strip()
+            if len(revised) >= len(section_text) * 0.6:
+                return revised
+        return section_text
+    except Exception:
+        return section_text  # fail-open: si la autocrítica falla, se conserva la sección original
 
 
 def _section_summary(text: str, n: int = 220) -> str:
@@ -372,9 +465,15 @@ def _run_multipass(session: ProjectSession, corrections: list, api_key: str,
     from agents import llm
     brief = session.brief
     cycle = session.current_cycle
+    # Construidos UNA vez y compartidos por arquitectura + cada sección: antes
+    # _build_architecture_prompt/_build_section_prompt solo recibían `brief`
+    # (parcial) y perdían perfiles de experto, lineamientos, requisitos, marcas
+    # de calidad, intake/plantilla/apoyo/presupuesto/observaciones previas —
+    # exactamente para los documentos más largos y exigentes (tesis, artículos).
+    ctx = _build_context_blocks(brief, session)
 
     # ── (A) Arquitectura ──────────────────────────────────────────────────────
-    arch_prompt = _build_architecture_prompt(brief, min_words)
+    arch_prompt = _build_architecture_prompt(brief, ctx, min_words)
     plan: list = []
     try:
         raw_plan, used = llm.complete_builder(
@@ -405,7 +504,7 @@ def _run_multipass(session: ProjectSession, corrections: list, api_key: str,
     written_summary: list[tuple[str, str]] = []
     section_texts: list[str] = []
     for idx, sec in enumerate(plan):
-        sec_prompt = _build_section_prompt(brief, plan, idx, written_summary, corrections)
+        sec_prompt = _build_section_prompt(brief, ctx, plan, idx, written_summary, corrections)
         try:
             sec_text, used = llm.complete_builder(
                 provider, system=SYSTEM_PROMPT, prompt=sec_prompt,
@@ -414,7 +513,16 @@ def _run_multipass(session: ProjectSession, corrections: list, api_key: str,
         except Exception as ex:
             sec_text = f"## {sec['title']}\n\n[Sección no generada por error técnico: {ex}]"
             used = "error"
-        section_texts.append(sec_text.strip())
+        sec_text = sec_text.strip()
+
+        # Autocrítica ACOTADA a esta sección (no al documento completo — ver
+        # _self_critique_section) para los doc_types de mayor exigencia.
+        if (config.WRITER_SELF_REVIEW
+                and brief.doc_type_key in config.WRITER_SELF_REVIEW_DOC_TYPES
+                and used != "error"):
+            sec_text = _self_critique_section(sec_text, sec["title"], brief, provider, api_key)
+
+        section_texts.append(sec_text)
         written_summary.append((sec["title"], _section_summary(sec_text)))
         session.builder_log.append({"cycle": cycle, "stage": f"multipass_section_{idx+1}",
                                     "requested": provider, "used": used})
@@ -439,7 +547,8 @@ def run(session: ProjectSession, corrections: list, api_key: str,
     provider = provider or config.builder_for_cycle(cycle)
 
     min_words = int((brief.format_spec or {}).get("min_words") or 0)
-    if min_words >= config.MULTIPASS_MIN_WORDS:
+    used_multipass = min_words >= config.MULTIPASS_MIN_WORDS
+    if used_multipass:
         text = _run_multipass(session, corrections, api_key, provider, min_words)
     else:
         prompt = _build_prompt(brief, session, corrections, cycle)
@@ -449,7 +558,12 @@ def run(session: ProjectSession, corrections: list, api_key: str,
         )
         session.builder_log.append({"cycle": cycle, "requested": provider, "used": used})
 
-    if (config.WRITER_SELF_REVIEW
+    # La autocrítica de DOCUMENTO COMPLETO solo es segura cuando el documento
+    # cupo en una sola llamada. Si vino de _run_multipass, cada sección ya pasó
+    # su propia autocrítica acotada (_self_critique_section) — reemitir el
+    # documento entero aquí volvería a arriesgar el mismo truncamiento silencioso
+    # que _run_multipass existe para evitar.
+    if (not used_multipass and config.WRITER_SELF_REVIEW
             and brief.doc_type_key in config.WRITER_SELF_REVIEW_DOC_TYPES):
         text = _self_critique_and_revise(text, brief, provider, api_key)
         session.builder_log.append({"cycle": cycle, "stage": "self_critique", "requested": provider})

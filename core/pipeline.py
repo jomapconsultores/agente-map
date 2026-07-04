@@ -438,6 +438,18 @@ def run_pipeline(
                      f"Puntaje: {g1.get('score', '—')}/100")
                 _keep_quality_notes(session, "Gate 1 — investigación", g1)
                 research_approved = True
+                session.research_approved = True
+                # Checkpoint best-effort: antes solo se persistía en pausa manual
+                # explícita. Un crash/redeploy a mitad del loop (hasta 10 ciclos)
+                # perdía la investigación ya aprobada y /retry la repetía desde
+                # cero. Con MAX_PIPELINE_RESTARTS=10 el costo de NO checkpointear
+                # aquí creció; guardar solo analysis/brief (repository.save_session,
+                # no utils.output.save_session — este último además escribe
+                # Word/Excel a disco en cada ciclo, que sería un desperdicio aquí).
+                try:
+                    repository.save_session(session)
+                except Exception:
+                    pass
             else:
                 _log(session_id, "fase1", f"Investigación ya aprobada — se reutiliza{cycle_label}",
                      "🌐", "done", "Gate 1 ya había pasado; no se repite la búsqueda web")
