@@ -10,6 +10,7 @@ configurada. Lanza SupabaseSaveError si la conexión existe pero algo falla.
 """
 from __future__ import annotations
 
+import concurrent.futures
 from dataclasses import asdict, fields, is_dataclass
 from typing import Any, Optional
 
@@ -312,17 +313,31 @@ def save_session(session: ProjectSession) -> str | None:
             raise SupabaseSaveError("upsert sessions devolvió data vacía")
         session_uuid = resp.data[0]["id"]
 
-        # Reemplazar borradores y revisiones (idempotente ante reintentos)
-        sb.table("proposal_versions").delete().eq("session_id", session_uuid).execute()
-        sb.table("reviews").delete().eq("session_id", session_uuid).execute()
+        # Reemplazar borradores y revisiones (idempotente ante reintentos).
+        # Ambos deletes deben terminar antes de insertar (se reemplazan por completo).
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            d1 = executor.submit(
+                lambda: sb.table("proposal_versions").delete().eq("session_id", session_uuid).execute()
+            )
+            d2 = executor.submit(
+                lambda: sb.table("reviews").delete().eq("session_id", session_uuid).execute()
+            )
+            d1.result()
+            d2.result()
 
         prop_rows = _proposal_rows(session_uuid, session)
-        if prop_rows:
-            sb.table("proposal_versions").insert(prop_rows).execute()
-
         rev_rows = _review_rows(session_uuid, session)
-        if rev_rows:
-            sb.table("reviews").insert(rev_rows).execute()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            i1 = executor.submit(
+                lambda: sb.table("proposal_versions").insert(prop_rows).execute()
+            ) if prop_rows else None
+            i2 = executor.submit(
+                lambda: sb.table("reviews").insert(rev_rows).execute()
+            ) if rev_rows else None
+            if i1 is not None:
+                i1.result()
+            if i2 is not None:
+                i2.result()
 
         return session_uuid
 
