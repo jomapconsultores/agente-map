@@ -234,16 +234,20 @@ def load_resumable_state(session_id: str) -> Optional[dict]:
         return None  # reanudar es best-effort: si falla, el pipeline arranca de cero
 
 
-def cancel_session(session_id: str) -> bool:
+def cancel_session(session_id: str, row_uuid: str | None = None) -> bool:
     """Cancela un trabajo (lo marca como fallido/cancelado, conservando el registro).
-    Devuelve True si existía. Idempotente si Supabase está apagado."""
+    Devuelve True si existía. Idempotente si Supabase está apagado.
+
+    Si `row_uuid` ya se conoce (ej. porque el caller ya hizo un select previo para
+    verificar propiedad), se omite el select interno de existencia."""
     if not is_enabled():
         return False
     try:
         sb = get_client(service_role=True)
-        sess = sb.table("sessions").select("id").eq("session_id", session_id).limit(1).execute()
-        if not sess.data:
-            return False
+        if row_uuid is None:
+            sess = sb.table("sessions").select("id").eq("session_id", session_id).limit(1).execute()
+            if not sess.data:
+                return False
         sb.table("sessions").update(
             {"status": "failed", "error_message": "Cancelado por el usuario",
              "completed_at": "now()"}
@@ -253,19 +257,23 @@ def cancel_session(session_id: str) -> bool:
         raise SupabaseSaveError(f"{type(e).__name__}: {e}") from e
 
 
-def delete_session(session_id: str) -> bool:
+def delete_session(session_id: str, row_uuid: str | None = None) -> bool:
     """Borra una sesión y sus borradores/revisiones. Devuelve True si existía.
-    Idempotente: si no existe o Supabase está apagado, devuelve False sin error."""
+    Idempotente: si no existe o Supabase está apagado, devuelve False sin error.
+
+    Si `row_uuid` ya se conoce (ej. porque el caller ya hizo un select previo para
+    verificar propiedad), se omite el select interno de existencia."""
     if not is_enabled():
         return False
     try:
         sb = get_client(service_role=True)
-        sess = (
-            sb.table("sessions").select("id").eq("session_id", session_id).limit(1).execute()
-        )
-        if not sess.data:
-            return False
-        row_uuid = sess.data[0]["id"]
+        if row_uuid is None:
+            sess = (
+                sb.table("sessions").select("id").eq("session_id", session_id).limit(1).execute()
+            )
+            if not sess.data:
+                return False
+            row_uuid = sess.data[0]["id"]
         sb.table("proposal_versions").delete().eq("session_id", row_uuid).execute()
         sb.table("reviews").delete().eq("session_id", row_uuid).execute()
         sb.table("sessions").delete().eq("session_id", session_id).execute()

@@ -16,6 +16,7 @@ Si el usuario proporcionó URLs, se descargan y analizan aquí también.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
 
@@ -34,15 +35,24 @@ def _clip(text: str, n: int = _MAX_CHARS) -> str:
 
 def _fetch_urls(user_input: str) -> list[tuple[str, str]]:
     """Descarga contenido de URLs presentes en el texto del usuario."""
-    urls = re.findall(r"https?://\S+", user_input or "")
+    urls = re.findall(r"https?://\S+", user_input or "")[:4]
     docs: list[tuple[str, str]] = []
-    for url in urls[:4]:
+    if not urls:
+        return docs
+
+    def _fetch_one(url: str) -> str | None:
         try:
             content = execute_fetch_page(url)
-            if content.strip():
-                docs.append((url, content))
+            return content if content.strip() else None
         except Exception:
-            pass
+            return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {url: executor.submit(_fetch_one, url) for url in urls}
+        for url in urls:
+            content = futures[url].result()
+            if content:
+                docs.append((url, content))
     return docs
 
 
