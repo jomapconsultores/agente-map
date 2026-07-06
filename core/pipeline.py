@@ -261,6 +261,8 @@ def run_pipeline(
     session_id: Optional[str] = None,
     owner_user_id: Optional[str] = None,
     seed_opportunity: Optional[dict] = None,
+    is_admin: bool = False,
+    allowed_modules: Optional[list[str]] = None,
 ) -> ProjectSession:
     """Corre el pipeline por fases con gates ≥90 y reinicio al inicio. Devuelve la sesión.
 
@@ -276,9 +278,33 @@ def run_pipeline(
     session_id = session_id or uuid.uuid4().hex[:8]
     support_docs = support_docs or []
 
+    _mark_running(session_id, owner_user_id)
+
     # FASE 0 — Clasificación (Mistral). Una sola vez para todo el pipeline.
     resolved_type = _resolve_doc_type(user_input, template_text, support_docs,
                                        api_key, doc_type_key)
+
+    # Re-valida el módulo DESPUÉS de conocer el tipo real: el gate en el endpoint HTTP
+    # solo pudo revisar el doc_type_key crudo recibido (a menudo "auto"), que aquí el
+    # clasificador puede resolver a un tipo de un módulo distinto (ej. "auto" -> "tesis",
+    # módulo "investigacion") sin que el llamador tuviera ese módulo asignado.
+    if allowed_modules is not None and not is_admin:
+        resolved_module = get_doc_type(resolved_type).module
+        has_access = (
+            ("proyectos" in allowed_modules or "investigacion" in allowed_modules)
+            if resolved_module == "ambos" else resolved_module in allowed_modules
+        )
+        if not has_access:
+            _mark_failed(
+                session_id,
+                f"No tienes el módulo '{resolved_module}' asignado, necesario para generar "
+                f"un documento de tipo '{resolved_type}'. Pídele al administrador que te lo otorgue.",
+            )
+            return ProjectSession(
+                session_id=session_id, user_input=user_input, input_mode=mode,
+                doc_type_key=resolved_type, template_text=template_text,
+                support_docs=support_docs, owner_user_id=owner_user_id,
+            )
 
     session = ProjectSession(
         session_id=session_id,
@@ -290,7 +316,6 @@ def run_pipeline(
         owner_user_id=owner_user_id,
     )
 
-    _mark_running(session_id, owner_user_id)
     # Un pipeline que arranca (fresco o "Continuar") nunca debe quedar pre-pausado:
     # sin esto, una sesión pausada una vez se repausaba de inmediato para siempre.
     repository.clear_pause_requested(session_id)

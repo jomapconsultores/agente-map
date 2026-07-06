@@ -193,6 +193,9 @@
       background:transparent; width:100%; text-align:left; transition:background .12s, color .12s; }
     .sb-item:hover { background:rgba(255,255,255,.06); color:#cbd5e1; }
     .sb-item.active { background:rgba(37,99,235,.25); color:#93c5fd; font-weight:600; }
+    .sb-no-access { margin:10px 8px; padding:12px; background:rgba(217,119,6,.12);
+      border:1px solid rgba(217,119,6,.35); border-radius:var(--radius-xs);
+      color:#fbbf24; font-size:12px; line-height:1.5; }
     .sb-item .ic { width:20px; text-align:center; font-size:14px; flex-shrink:0; opacity:.8; }
     .sb-item.active .ic { opacity:1; }
     .sb-item.sub { padding-left:16px; font-size:13px; }
@@ -292,6 +295,28 @@
     .guide-step.done .gstitle { text-decoration:line-through; color:var(--muted); }
     .guide-step .gsdesc { font-size:11.5px; color:var(--muted); margin-top:2px; line-height:1.4; }
     .guide-step .gsarrow { color:var(--muted); font-size:12px; flex-shrink:0; margin-top:6px; }
+    /* ── Selector de rol (multi-rol) ── */
+    .role-switch { position:relative; }
+    .role-switch-btn { background:var(--accent-3); border:1px solid rgba(37,99,235,.3);
+      color:var(--accent-2); border-radius:var(--radius-sm); padding:6px 12px; font-size:13px;
+      font-weight:600; cursor:pointer; display:flex; align-items:center; gap:6px; white-space:nowrap; }
+    .role-switch-btn:hover { border-color:var(--accent); }
+    .role-menu { display:none; position:absolute; top:calc(100% + 8px); right:0;
+      min-width:200px; background:var(--panel); border:1px solid var(--line);
+      border-radius:var(--radius); box-shadow:var(--shadow); z-index:200; overflow:hidden; padding:6px; }
+    .role-menu.show { display:block; }
+    .role-menu .rm-label { font-size:10.5px; text-transform:uppercase; letter-spacing:.05em;
+      color:var(--muted); padding:6px 8px 4px; }
+    .role-menu button { display:flex; align-items:center; justify-content:space-between;
+      width:100%; text-align:left; padding:8px 9px; background:none; border:0;
+      border-radius:var(--radius-xs); font-size:13px; color:var(--fg-2); cursor:pointer; }
+    .role-menu button:hover { background:var(--bg-2); }
+    .role-menu button.active { color:var(--accent-2); font-weight:700; background:var(--accent-3); }
+    .role-chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+    .role-chip { padding:3px 10px; border-radius:99px; font-size:11px; font-weight:600;
+      border:1px solid var(--line-2); background:var(--panel-2); color:var(--muted); cursor:pointer; }
+    .role-chip:hover { border-color:var(--accent); color:var(--accent-2); }
+    .role-chip.on { background:rgba(5,150,105,.1); border-color:#bbf7d0; color:var(--ok); }
     .guide-divider { height:1px; background:var(--line); margin:4px 0; }
     .hamb { display:none; background:transparent; border:1px solid var(--line);
       color:var(--fg-2); border-radius:var(--radius-sm); padding:7px 10px; font-size:15px; }
@@ -658,31 +683,47 @@
       <nav class="sb-nav" id="sb-nav">
         <button class="sb-item active" data-nav="all" onclick="navTo('all')"><span class="ic">🏠</span> Inicio</button>
 
-        <div class="sb-section">🎯 Captación activa</div>
-        <button class="sb-item" data-nav="captacion" onclick="navTo('captacion')"><span class="ic">🔍</span> Buscar mercado</button>
-        <button class="sb-item" data-nav="prospectos" onclick="navTo('prospectos')"><span class="ic">📋</span> Prospectos <span class="sb-badge" id="sb-prosp" style="display:none">0</span></button>
+        <div class="sb-no-access" id="sb-no-access" style="display:none">
+          Aún no tienes ningún rol asignado. Contacta al administrador para que te dé acceso a un módulo.
+        </div>
 
-        <div class="sb-section">📥 Prospección / Importar</div>
-        <button class="sb-item sub" onclick="openImportarModal()"><span class="ic">⬆️</span> Importar lista <span class="add">＋</span></button>
+        <div class="sb-mod" data-mod="captacion">
+          <div class="sb-section">🎯 Captación activa</div>
+          <button class="sb-item" data-nav="captacion" onclick="navTo('captacion')"><span class="ic">🔍</span> Buscar mercado</button>
+          <button class="sb-item" data-nav="prospectos" onclick="navTo('prospectos')"><span class="ic">📋</span> Prospectos <span class="sb-badge" id="sb-prosp" style="display:none">0</span></button>
+        </div>
 
-        <div class="sb-section">👥 Clientes</div>
-        <button class="sb-item" data-nav="clientes" onclick="navTo('clientes')"><span class="ic">📂</span> Ver todos</button>
-        <button class="sb-item sub" onclick="openNuevoClienteModal()"><span class="ic">➕</span> Nuevo cliente</button>
+        <div class="sb-mod" data-mod="captacion">
+          <div class="sb-section">📥 Prospección / Importar</div>
+          <button class="sb-item sub" onclick="openImportarModal()"><span class="ic">⬆️</span> Importar lista <span class="add">＋</span></button>
+        </div>
 
-        <div class="sb-section">🔬 Investigación</div>
-        <button class="sb-item" data-nav="investigacion" onclick="navTo('investigacion')"><span class="ic">📂</span> Ver todo</button>
-        <button class="sb-item sub" onclick="launchAction('inv_hacer')"><span class="ic">✍️</span> Hacer <span class="add">＋</span></button>
-        <button class="sb-item sub" onclick="launchAction('inv_revisar')"><span class="ic">🔍</span> Revisar <span class="add">＋</span></button>
+        <div class="sb-mod" data-mod="clientes">
+          <div class="sb-section">👥 Clientes</div>
+          <button class="sb-item" data-nav="clientes" onclick="navTo('clientes')"><span class="ic">📂</span> Ver todos</button>
+          <button class="sb-item sub" onclick="openNuevoClienteModal()"><span class="ic">➕</span> Nuevo cliente</button>
+        </div>
 
-        <div class="sb-section">📊 Proyectos</div>
-        <button class="sb-item" data-nav="proyectos" onclick="navTo('proyectos')"><span class="ic">📂</span> Ver todo</button>
-        <button class="sb-item sub" onclick="launchAction('proj_buscar')"><span class="ic">🌐</span> Buscar proyectos <span class="add">＋</span></button>
-        <button class="sb-item sub" onclick="launchAction('proj_enlaces')"><span class="ic">🔗</span> Subir enlaces <span class="add">＋</span></button>
-        <button class="sb-item sub" onclick="launchAction('proj_docs')"><span class="ic">📄</span> Documentos <span class="add">＋</span></button>
+        <div class="sb-mod" data-mod="investigacion">
+          <div class="sb-section">🔬 Investigación</div>
+          <button class="sb-item" data-nav="investigacion" onclick="navTo('investigacion')"><span class="ic">📂</span> Ver todo</button>
+          <button class="sb-item sub" onclick="launchAction('inv_hacer')"><span class="ic">✍️</span> Hacer <span class="add">＋</span></button>
+          <button class="sb-item sub" onclick="launchAction('inv_revisar')"><span class="ic">🔍</span> Revisar <span class="add">＋</span></button>
+        </div>
 
-        <div class="sb-section">📝 Oficios y Peticiones</div>
-        <button class="sb-item" data-nav="oficios" onclick="navTo('oficios')"><span class="ic">📂</span> Ver todo</button>
-        <button class="sb-item sub" onclick="openOficioModal()"><span class="ic">✉️</span> Nuevo oficio <span class="add">＋</span></button>
+        <div class="sb-mod" data-mod="proyectos">
+          <div class="sb-section">📊 Proyectos</div>
+          <button class="sb-item" data-nav="proyectos" onclick="navTo('proyectos')"><span class="ic">📂</span> Ver todo</button>
+          <button class="sb-item sub" onclick="launchAction('proj_buscar')"><span class="ic">🌐</span> Buscar proyectos <span class="add">＋</span></button>
+          <button class="sb-item sub" onclick="launchAction('proj_enlaces')"><span class="ic">🔗</span> Subir enlaces <span class="add">＋</span></button>
+          <button class="sb-item sub" onclick="launchAction('proj_docs')"><span class="ic">📄</span> Documentos <span class="add">＋</span></button>
+        </div>
+
+        <div class="sb-mod" data-mod="oficios">
+          <div class="sb-section">📝 Oficios y Peticiones</div>
+          <button class="sb-item" data-nav="oficios" onclick="navTo('oficios')"><span class="ic">📂</span> Ver todo</button>
+          <button class="sb-item sub" onclick="openOficioModal()"><span class="ic">✉️</span> Nuevo oficio <span class="add">＋</span></button>
+        </div>
 
         <div class="sb-section">Estado</div>
         <button class="sb-item" data-nav="incon" onclick="navTo('incon')"><span class="ic">⏳</span> Inconclusos <span class="sb-badge" id="sb-incon" style="display:none">0</span></button>
@@ -727,6 +768,15 @@
               <button class="ghclose" onclick="toggleGuide()">✕</button>
             </div>
             <ul class="guide-steps" id="guide-steps"></ul>
+          </div>
+        </div>
+        <div class="role-switch" id="role-switch" style="display:none">
+          <button class="role-switch-btn" id="role-switch-btn" onclick="toggleRoleMenu()" title="Cambiar de rol">
+            <span id="role-switch-label">🎭 Rol</span> <span style="font-size:10px">▾</span>
+          </button>
+          <div class="role-menu" id="role-menu">
+            <div class="rm-label">Tus roles</div>
+            <div id="role-menu-items"></div>
           </div>
         </div>
         <button class="btn gold" onclick="openNewModal()">＋ Nuevo entregable</button>
@@ -997,9 +1047,41 @@
     <div class="modal">
       <div class="modal-header">
         <h2>👥 Usuarios</h2>
-        <button class="btn ghost btn-sm" onclick="document.getElementById('users-modal').classList.remove('show')">✕</button>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn subtle btn-sm" onclick="openNuevoTrabajadorModal()">＋ Nuevo trabajador</button>
+          <button class="btn ghost btn-sm" onclick="document.getElementById('users-modal').classList.remove('show')">✕</button>
+        </div>
       </div>
       <div class="modal-body" id="users-body">Cargando…</div>
+    </div>
+  </div>
+
+  <!-- Modal: nuevo trabajador (admin) -->
+  <div class="modal-backdrop" id="nuevo-trabajador-modal" onclick="if(event.target===this)closeNuevoTrabajadorModal()">
+    <div class="modal" style="max-width:440px">
+      <div class="modal-header">
+        <h2>＋ Nuevo trabajador</h2>
+        <button class="btn ghost btn-sm" onclick="closeNuevoTrabajadorModal()">✕</button>
+      </div>
+      <div class="modal-body" style="padding:18px 22px 22px;display:flex;flex-direction:column;gap:12px">
+        <p class="muted" style="font-size:12px;margin:0">
+          Cuenta creada y aprobada de inmediato. Después de crearla, otórgale los módulos
+          pertinentes desde esta misma lista.</p>
+        <div>
+          <label class="field-label">Nombre</label>
+          <input id="nt-nombre" type="text" placeholder="Nombre completo" style="width:100%">
+        </div>
+        <div>
+          <label class="field-label">Email <span class="req-star">*</span></label>
+          <input id="nt-email" type="email" placeholder="correo@empresa.com" style="width:100%">
+        </div>
+        <div>
+          <label class="field-label">Contraseña <span class="req-star">*</span></label>
+          <input id="nt-pass" type="password" autocomplete="new-password" placeholder="Mínimo 6 caracteres" style="width:100%">
+        </div>
+        <div id="nt-msg" class="muted" style="font-size:12px;min-height:16px;color:var(--err)"></div>
+        <button id="nt-submit-btn" class="btn gold btn-block" onclick="submitNuevoTrabajador()">Crear trabajador</button>
+      </div>
     </div>
   </div>
 
@@ -1295,6 +1377,14 @@
     let templateDoc = null;   // { name, text, chars }
     let lastRows = [];
     let lastInProgressIds = new Set();
+    const ACTIVE_MOD_LS = "agente_map.active_module";
+    const ALL_MODULES = ["captacion", "clientes", "investigacion", "proyectos", "oficios"];
+    const MODULE_LABELS = {
+      captacion: "🎯 Captación", clientes: "👥 Clientes", investigacion: "🔬 Investigación",
+      proyectos: "📊 Proyectos", oficios: "📝 Oficios",
+    };
+    let userModules = [];
+    let activeModule = null;
 
     const $ = id => document.getElementById(id);
     const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -1689,6 +1779,7 @@
       $("sb-admin-sec").style.display = isAdmin ? "" : "none";
       $("sb-users-btn").style.display = isAdmin ? "" : "none";
       $("sb-saldos-btn").style.display = isAdmin ? "" : "none";
+      setupRoleSwitch();
       await loadDocTypes();
       initDropzone();
       await loadList();
@@ -1696,8 +1787,70 @@
       maybeRequestNotificationPermission();
     }
 
+    /* ════════ Multi-rol: selector de rol activo ════════ */
+    // Namespaced por cuenta: sin esto, dos usuarios distintos en el mismo
+    // dispositivo compartían la misma clave global y el "rol activo" de uno
+    // se filtraba al sidebar del otro tras iniciar sesión.
+    function activeModKey() {
+      const id = (currentUser && (currentUser.id || currentUser.email)) || "anon";
+      return `${ACTIVE_MOD_LS}.${id}`;
+    }
+
+    function setupRoleSwitch() {
+      const isAdmin = currentUser && currentUser.role === "admin";
+      userModules = (currentUser && currentUser.modules) || [];
+      const sw = $("role-switch");
+      if (isAdmin || userModules.length <= 1) {
+        sw.style.display = "none";
+        activeModule = isAdmin ? null : (userModules[0] || null);
+      } else {
+        sw.style.display = "";
+        const saved = localStorage.getItem(activeModKey());
+        activeModule = userModules.includes(saved) ? saved : userModules[0];
+        renderRoleMenu();
+      }
+      applyModuleVisibility();
+    }
+
+    function renderRoleMenu() {
+      $("role-switch-label").textContent = MODULE_LABELS[activeModule] || "🎭 Rol";
+      $("role-menu-items").innerHTML = userModules.map(m => `
+        <button class="${m === activeModule ? 'active' : ''}" onclick="pickRole('${m}')">
+          ${esc(MODULE_LABELS[m] || m)} ${m === activeModule ? '✓' : ''}
+        </button>`).join("");
+    }
+
+    function toggleRoleMenu() { $("role-menu").classList.toggle("show"); }
+
+    function pickRole(m) {
+      activeModule = m;
+      localStorage.setItem(activeModKey(), m);
+      $("role-menu").classList.remove("show");
+      renderRoleMenu();
+      applyModuleVisibility();
+      navTo("all");
+      toast(`Rol activo: ${MODULE_LABELS[m] || m}`, "ok");
+    }
+
+    document.addEventListener("click", e => {
+      if (!e.target.closest("#role-switch")) { const m = $("role-menu"); if (m) m.classList.remove("show"); }
+    });
+
+    function applyModuleVisibility() {
+      const isAdmin = currentUser && currentUser.role === "admin";
+      document.querySelectorAll(".sb-mod").forEach(el => {
+        const m = el.dataset.mod;
+        const visible = isAdmin || (userModules.includes(m) && (!activeModule || activeModule === m));
+        el.style.display = visible ? "" : "none";
+      });
+      const na = $("sb-no-access");
+      if (na) na.style.display = (!isAdmin && userModules.length === 0) ? "" : "none";
+    }
+
     function lockNow() {
       authToken = ""; masterKey = ""; currentUser = null;
+      userModules = []; activeModule = null;
+      $("role-switch").style.display = "none";
       localStorage.removeItem(TOKEN_LS); localStorage.removeItem(MASTER_LS);
       if (pollTimer) clearTimeout(pollTimer);
       $("app").hidden = true; $("lock").hidden = false;
@@ -1736,27 +1889,52 @@
       $("users-modal").classList.add("show");
       $("users-body").innerHTML = "Cargando…";
       try {
-        const r = await api("/users"); const list = await r.json();
-        $("users-body").innerHTML = list.length ? list.map(userRow).join("")
+        const [ur, rr] = await Promise.all([api("/users"), api("/admin/roles")]);
+        const list = await ur.json();
+        const rolesByUser = await rr.json();
+        $("users-body").innerHTML = list.length ? list.map(u => userRow(u, rolesByUser[u.id] || [])).join("")
           : '<div class="muted">No hay usuarios.</div>';
       } catch (e) { $("users-body").innerHTML = `<div class="muted">${esc(e.message)}</div>`; }
     }
-    function userRow(u) {
+    function userRow(u, mods) {
       const st = u.status==="approved" ? '<span class="pill approved">aprobado</span>'
                : u.status==="pending" ? '<span class="pill pending">pendiente</span>'
                : '<span class="pill failed">rechazado</span>';
-      const role = u.role==="admin" ? '<span class="pill go">admin</span>' : '';
+      const role = u.role==="admin" ? '<span class="pill go">admin</span>'
+                 : u.role==="trabajador" ? '<span class="pill conditional">trabajador</span>' : "";
+      const roleActions = {
+        admin:      [["make-user", "Quitar admin"]],
+        trabajador: [["make-user", "Hacer usuario"], ["make-admin", "Hacer admin"]],
+        user:       [["make-trabajador", "Hacer trabajador"], ["make-admin", "Hacer admin"]],
+      }[u.role] || [];
       const actions = u.status==="pending"
         ? `<button class="btn btn-sm" onclick="userAction('${u.id}','approve')">Aprobar</button> <button class="btn subtle btn-sm" onclick="userAction('${u.id}','reject')">Rechazar</button>`
-        : (u.role!=="admin" ? `<button class="btn subtle btn-sm" onclick="userAction('${u.id}','make-admin')">Hacer admin</button>` : "");
-      return `<div style="display:flex;align-items:center;gap:10px;padding:11px 0;border-bottom:1px solid var(--line)">
+        : roleActions.map(([action, label]) =>
+            `<button class="btn subtle btn-sm" onclick="userAction('${u.id}','${action}')">${label}</button>`).join(" ");
+      const roleChips = u.role === "admin"
+        ? '<div class="muted" style="font-size:11.5px;margin-top:6px">Administrador: acceso a todos los módulos.</div>'
+        : `<div class="role-chips">${ALL_MODULES.map(m => `
+            <button type="button" class="role-chip ${mods.includes(m) ? 'on' : ''}"
+              onclick="toggleModuleRole('${u.id}','${m}',${mods.includes(m)})"
+              title="${mods.includes(m) ? 'Clic para revocar' : 'Clic para otorgar'}">${esc(MODULE_LABELS[m])}</button>
+          `).join("")}</div>`;
+      return `<div style="padding:11px 0;border-bottom:1px solid var(--line)">
+        <div style="display:flex;align-items:center;gap:10px">
         <div style="flex:1;min-width:0"><div style="font-weight:600">${esc(u.name||"(sin nombre)")} ${role}</div>
         <div class="muted" style="font-size:12px">${esc(u.email)} · ${st}</div></div>
-        <div style="display:flex;gap:6px;flex-shrink:0">${actions}</div></div>`;
+        <div style="display:flex;gap:6px;flex-shrink:0">${actions}</div></div>
+        ${roleChips}</div>`;
     }
     async function userAction(id, action) {
       try { await api(`/users/${id}/${action}`, { method:"POST" }); toast("Hecho.", "ok"); openUsersModal(); refreshPendingBadge(); }
       catch (e) { toast(e.message, "err"); }
+    }
+    async function toggleModuleRole(userId, module, isOn) {
+      try {
+        if (isOn) await api(`/users/${userId}/roles/${module}`, { method:"DELETE" });
+        else await api(`/users/${userId}/roles`, { method:"POST", body: JSON.stringify({ module }) });
+        openUsersModal();
+      } catch (e) { toast(e.message, "err"); }
     }
 
     /* ════════ API ════════ */
@@ -1894,10 +2072,20 @@
       window.guideActions = steps.map(s => s.action);
     }
     let listRows = [];
+    function canUseModule(m) {
+      const isAdmin = currentUser && currentUser.role === "admin";
+      return isAdmin || userModules.includes(m);
+    }
+
     function launchAction(a) {
+      const mod = ACTIONS[a].module;
+      if (!canUseModule(mod)) {
+        toast(`No tienes el rol '${MODULE_LABELS[mod] || mod}' asignado. Pídele al administrador que te lo otorgue.`, "err");
+        return;
+      }
       $("app").classList.remove("sb-open");
-      openNewModal();
-      setModule(ACTIONS[a].module);
+      openNewModal(mod);
+      setModule(mod);
       setAction(a);
     }
 
@@ -2031,9 +2219,18 @@
     }
 
     /* ════════ Modal ════════ */
-    function openNewModal() {
+    function openNewModal(preferredModule) {
+      const canInv = canUseModule("investigacion"), canProy = canUseModule("proyectos");
+      if (!canInv && !canProy) {
+        toast("No tienes ningún rol de creación de entregables asignado. Pídele al administrador que te otorgue 'investigacion' o 'proyectos'.", "err");
+        return;
+      }
+      let mod = preferredModule || (navModule === "proyectos" ? "proyectos" : "investigacion");
+      if (!canUseModule(mod)) mod = canInv ? "investigacion" : "proyectos";
+      $("module-grid").querySelector('[data-module="investigacion"]').style.display = canInv ? "" : "none";
+      $("module-grid").querySelector('[data-module="proyectos"]').style.display = canProy ? "" : "none";
       resetUploads(); $("user_input").value = "";
-      setModule(navModule === "proyectos" ? "proyectos" : "investigacion");
+      setModule(mod);
       $("modal-backdrop").classList.add("show");
       setTimeout(() => $("user_input").focus(), 200);
     }
@@ -2910,6 +3107,30 @@
 
     function openNuevoClienteModal() { $("nuevo-cliente-modal").classList.add("show"); }
     function closeNuevoClienteModal() { $("nuevo-cliente-modal").classList.remove("show"); }
+
+    function openNuevoTrabajadorModal() {
+      $("nt-nombre").value = ""; $("nt-email").value = ""; $("nt-pass").value = ""; $("nt-msg").textContent = "";
+      $("nuevo-trabajador-modal").classList.add("show");
+    }
+    function closeNuevoTrabajadorModal() { $("nuevo-trabajador-modal").classList.remove("show"); }
+
+    async function submitNuevoTrabajador() {
+      const email = $("nt-email").value.trim();
+      const password = $("nt-pass").value;
+      if (!email || !password) { $("nt-msg").textContent = "Email y contraseña son obligatorios."; return; }
+      if (password.length < 6) { $("nt-msg").textContent = "La contraseña debe tener al menos 6 caracteres."; return; }
+      const btn = $("nt-submit-btn"); btn.disabled = true;
+      try {
+        await api("/admin/trabajadores", { method: "POST", body: JSON.stringify({
+          email, name: $("nt-nombre").value.trim(), password,
+        })});
+        closeNuevoTrabajadorModal();
+        toast("✅ Trabajador creado. Ahora otórgale sus módulos.", "ok");
+        openUsersModal();
+      } catch (e) {
+        $("nt-msg").textContent = e.message;
+      } finally { btn.disabled = false; }
+    }
 
     async function submitNuevoCliente() {
       const nombre = $("nc-nombre").value.trim();

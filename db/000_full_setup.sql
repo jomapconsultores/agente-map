@@ -5,7 +5,14 @@
 --   1. Supabase → tu proyecto → SQL Editor → New query
 --   2. Pega TODO este archivo y "Run".
 --
--- Incluye: sessions (+status, url, owner), proposal_versions, reviews, users.
+-- Incluye: sessions (+status, url, owner), proposal_versions, reviews, users,
+-- user_module_roles (roles por módulo, incl. 'trabajador').
+--
+-- IMPORTANTE: este snapshot NO incluye las migraciones de webauthn (006),
+-- oficios (007), captación (008) ni resume_state (009) — para un proyecto
+-- nuevo, después de correr este archivo aplica también esas, o usa
+-- POST /admin/migrate (que concatena y corre TODAS las db/NNN_*.sql reales).
+--
 -- RLS activado sin políticas → solo la secret key (service_role) accede.
 -- Idempotente: se puede re-ejecutar sin romper nada.
 -- =============================================================================
@@ -19,13 +26,26 @@ create table if not exists public.users (
     name           text not null default '',
     password_hash  text not null,
     password_salt  text not null,
-    role           text not null default 'user'   check (role in ('admin','user')),
+    role           text not null default 'user'   check (role in ('admin','user','trabajador')),
     status         text not null default 'pending' check (status in ('pending','approved','rejected')),
     created_at     timestamptz not null default now(),
     last_login_at  timestamptz
 );
 create index if not exists users_email_idx  on public.users (email);
 create index if not exists users_status_idx on public.users (status);
+
+-- ── user_module_roles (multi-rol por módulo, otorgado solo por el admin) ────
+create table if not exists public.user_module_roles (
+    id           uuid primary key default gen_random_uuid(),
+    user_id      uuid not null references public.users(id) on delete cascade,
+    module       text not null check (module in
+                    ('captacion','clientes','investigacion','proyectos','oficios')),
+    granted_by   uuid references public.users(id) on delete set null,
+    created_at   timestamptz not null default now(),
+    unique (user_id, module)
+);
+create index if not exists umr_user_idx on public.user_module_roles (user_id);
+alter table public.user_module_roles enable row level security;
 
 -- ── sessions ────────────────────────────────────────────────────────────────
 create table if not exists public.sessions (

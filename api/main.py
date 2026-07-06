@@ -14,6 +14,7 @@ sessions.status (pending → running → approved/failed).
 """
 from __future__ import annotations
 
+import hmac
 import io
 import json
 import os
@@ -34,7 +35,8 @@ import api.auth as auth_lib
 from core.pipeline import run_pipeline, run_scouting
 from db import queries
 from db import users as users_repo
-from models.doc_types import list_doc_types, list_modules
+from db import permissions_repo
+from models.doc_types import get_doc_type, list_doc_types, list_modules
 from models.schemas import DocumentBrief, FinancialPackage, ProjectSession
 
 
@@ -51,12 +53,15 @@ API_KEY_ENV = "AGENTE_MAP_API_KEY"
 class Principal:
     def __init__(self, user_id: Optional[str], role: str,
                  email: Optional[str] = None, name: Optional[str] = None,
-                 master: bool = False):
+                 master: bool = False, modules: Optional[list[str]] = None):
         self.user_id = user_id
         self.role = role
         self.email = email
         self.name = name
         self.master = master
+        # Módulos (captacion/clientes/investigacion/proyectos/oficios) otorgados
+        # por el administrador. Un admin tiene acceso implícito a todos.
+        self.modules = list(modules or [])
 
     @property
     def is_admin(self) -> bool:
@@ -66,12 +71,31 @@ class Principal:
         """None → ve todo (admin/maestra). Si no, restringe a su user_id."""
         return None if self.is_admin else self.user_id
 
+    def has_module(self, module: str) -> bool:
+        return self.is_admin or module in self.modules
+
+
+def _load_modules(role: str, user_id: Optional[str]) -> list[str]:
+    if role == "admin" or not user_id:
+        return list(permissions_repo.MODULES)
+    try:
+        return permissions_repo.list_for_user(user_id)
+    except Exception as e:  # noqa: BLE001
+        # Fail-closed (0 módulos) para no bloquear el login si aún falta aplicar
+        # la migración 010 — pero SIEMPRE logueado: sin esto, un fallo real de
+        # Supabase (timeout, RLS mal aplicada, credenciales) se confunde
+        # silenciosamente con "usuario sin módulos otorgados".
+        print(f"[_load_modules] no se pudieron leer los módulos de user_id={user_id}: "
+              f"{type(e).__name__}: {e}")
+        return []
+
 
 def get_principal(authorization: Optional[str] = Header(None),
                   x_api_key: Optional[str] = Header(None)) -> Principal:
     master = os.getenv(API_KEY_ENV, "")
-    if x_api_key and master and x_api_key == master:
-        return Principal(None, "admin", name="Administrador", master=True)
+    if x_api_key and master and hmac.compare_digest(x_api_key, master):
+        return Principal(None, "admin", name="Administrador", master=True,
+                         modules=list(permissions_repo.MODULES))
     token = None
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
@@ -89,15 +113,45 @@ def get_principal(authorization: Optional[str] = Header(None),
                 if not u or u.get("status") != "approved":
                     raise HTTPException(
                         401, "Sesión inválida: tu cuenta ya no está activa. Inicia sesión de nuevo.")
-                return Principal(uid, u.get("role", "user"), email=u.get("email"), name=u.get("name"))
+                role = u.get("role", "user")
+                return Principal(uid, role, email=u.get("email"), name=u.get("name"),
+                                 modules=_load_modules(role, uid))
             # Sin BD de usuarios configurada no hay estado que revalidar: confía en el token.
-            return Principal(uid, payload.get("role", "user"))
+            role = payload.get("role", "user")
+            return Principal(uid, role, modules=list(permissions_repo.MODULES) if role == "admin" else [])
     raise HTTPException(401, "No autenticado. Inicia sesión.")
 
 
 def require_admin(p: Principal) -> None:
     if not p.is_admin:
         raise HTTPException(403, "Requiere rol administrador.")
+
+
+def require_module(p: Principal, module: str) -> None:
+    if not p.has_module(module):
+        raise HTTPException(
+            403, f"No tienes el rol '{module}' asignado. Pídele al administrador que te lo otorgue.")
+
+
+def _resolve_doc_module(doc_type_key: str) -> str:
+    key = (doc_type_key or "auto").strip().lower()
+    if key == "auto":
+        return "proyectos"
+    try:
+        return get_doc_type(key).module
+    except Exception:
+        return "proyectos"
+
+
+def require_doc_module(p: Principal, doc_type_key: str) -> None:
+    mod = _resolve_doc_module(doc_type_key)
+    if mod == "ambos":
+        if p.is_admin or "proyectos" in p.modules or "investigacion" in p.modules:
+            return
+        raise HTTPException(
+            403, "No tienes el rol 'proyectos' ni 'investigacion' asignado. "
+                "Pídele al administrador que te otorgue alguno.")
+    require_module(p, mod)
 
 
 def _require_supabase() -> None:
@@ -114,6 +168,9 @@ def _db(fn, *args, **kwargs):
         raise
     except Exception as e:  # noqa: BLE001
         msg = str(e)
+        if "user_module_roles" in msg and ("does not exist" in msg or "schema cache" in msg or "relation" in msg):
+            raise HTTPException(500, "La tabla de roles por módulo no existe. Aplica la migración "
+                                     "db/010_module_roles.sql en Supabase (SQL Editor).")
         if "users" in msg and ("does not exist" in msg or "schema cache" in msg or "relation" in msg):
             raise HTTPException(500, "La tabla de usuarios no existe. Aplica la migración "
                                      "db/004_auth_and_owner.sql en Supabase (SQL Editor).")
@@ -690,18 +747,22 @@ def login(req: LoginRequest):
         raise HTTPException(403, "Tu cuenta no está activa. Contacta al administrador.")
     users_repo.touch_login(u["id"])
     token = auth_lib.make_token(u["id"], u.get("role", "user"))
-    return {"token": token, "user": users_repo.public_view(u)}
+    view = users_repo.public_view(u)
+    view["modules"] = _load_modules(u.get("role", "user"), u["id"])
+    return {"token": token, "user": view}
 
 
 @app.get("/auth/me")
 def me(p: Principal = Depends(get_principal)):
     if p.master:
         return {"id": None, "name": "Administrador (clave maestra)", "email": None,
-                "role": "admin", "status": "approved"}
+                "role": "admin", "status": "approved", "modules": list(permissions_repo.MODULES)}
     u = _db(users_repo.get_by_id, p.user_id) if p.user_id else None
     if not u:
         raise HTTPException(401, "Sesión inválida.")
-    return users_repo.public_view(u)
+    view = users_repo.public_view(u)
+    view["modules"] = _load_modules(u.get("role", "user"), u["id"])
+    return view
 
 
 # ── Gestión de usuarios (solo admin) ─────────────────────────────────────────
@@ -710,6 +771,14 @@ def list_users_ep(status: Optional[str] = Query(None), p: Principal = Depends(ge
     require_admin(p)
     _require_supabase()
     return _db(users_repo.list_users, status)
+
+
+def _count_approved_admins() -> int:
+    # Cuenta solo admins que realmente pueden autenticarse (status='approved'):
+    # un admin 'rejected'/'pending' ya no puede iniciar sesión (get_principal lo
+    # exige), pero seguía sumando aquí y neutralizaba el guard anti-último-admin.
+    return sum(1 for u in _db(users_repo.list_users, None)
+               if u.get("role") == "admin" and u.get("status") == "approved")
 
 
 @app.post("/users/{user_id}/approve")
@@ -722,6 +791,14 @@ def approve_user(user_id: str, p: Principal = Depends(get_principal)):
 @app.post("/users/{user_id}/reject")
 def reject_user(user_id: str, p: Principal = Depends(get_principal)):
     require_admin(p)
+    u = _db(users_repo.get_by_id, user_id)
+    if not u:
+        raise HTTPException(404, "Usuario no encontrado.")
+    # Rechazar a un admin ya aprobado lo deja sin poder autenticarse — es una
+    # vía alterna para desactivar al único admin funcional, igual que
+    # make-trabajador/make-user; debe llevar la misma protección.
+    if u.get("role") == "admin" and u.get("status") == "approved" and _count_approved_admins() <= 1:
+        raise HTTPException(409, "No puedes rechazar al único administrador activo.")
     users_repo.set_status(user_id, "rejected")
     return {"ok": True, "status": "rejected"}
 
@@ -729,8 +806,105 @@ def reject_user(user_id: str, p: Principal = Depends(get_principal)):
 @app.post("/users/{user_id}/make-admin")
 def make_admin(user_id: str, p: Principal = Depends(get_principal)):
     require_admin(p)
+    u = _db(users_repo.get_by_id, user_id)
+    if not u:
+        raise HTTPException(404, "Usuario no encontrado.")
     users_repo.set_role(user_id, "admin")
     return {"ok": True, "role": "admin"}
+
+
+@app.post("/users/{user_id}/make-trabajador")
+def make_trabajador(user_id: str, p: Principal = Depends(get_principal)):
+    """Convierte una cuenta existente en 'trabajador'. Solo admin."""
+    require_admin(p)
+    u = _db(users_repo.get_by_id, user_id)
+    if not u:
+        raise HTTPException(404, "Usuario no encontrado.")
+    was_last_admin_target = u.get("role") == "admin"
+    if was_last_admin_target and _count_approved_admins() <= 1:
+        raise HTTPException(409, "No puedes quitarle el rol admin al único administrador.")
+    users_repo.set_role(user_id, "trabajador")
+    # Cierra la ventana entre el chequeo y la escritura (dos requests concurrentes
+    # degradando a los últimos 2 admins a la vez): si tras escribir ya no queda
+    # ningún admin aprobado, revierte esta escritura en vez de dejar el sistema
+    # sin nadie que pueda administrar.
+    if was_last_admin_target and _count_approved_admins() == 0:
+        users_repo.set_role(user_id, "admin")
+        raise HTTPException(409, "No puedes quitarle el rol admin al único administrador.")
+    return {"ok": True, "role": "trabajador"}
+
+
+@app.post("/users/{user_id}/make-user")
+def make_user(user_id: str, p: Principal = Depends(get_principal)):
+    """Devuelve una cuenta (admin o trabajador) al rol base 'user'. Solo admin."""
+    require_admin(p)
+    u = _db(users_repo.get_by_id, user_id)
+    if not u:
+        raise HTTPException(404, "Usuario no encontrado.")
+    was_last_admin_target = u.get("role") == "admin"
+    if was_last_admin_target and _count_approved_admins() <= 1:
+        raise HTTPException(409, "No puedes quitarle el rol admin al único administrador.")
+    users_repo.set_role(user_id, "user")
+    if was_last_admin_target and _count_approved_admins() == 0:
+        users_repo.set_role(user_id, "admin")
+        raise HTTPException(409, "No puedes quitarle el rol admin al único administrador.")
+    return {"ok": True, "role": "user"}
+
+
+class CreateWorkerRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=200)
+    name: str = Field("", max_length=120)
+    password: str = Field(..., min_length=6, max_length=200)
+
+
+@app.post("/admin/trabajadores", status_code=201)
+def create_trabajador(req: CreateWorkerRequest, p: Principal = Depends(get_principal)):
+    """Crea directamente una cuenta 'trabajador' (aprobada de inmediato, sin pasar
+    por la cola de auto-registro): el administrador la crea y luego le otorga los
+    módulos pertinentes desde el panel de usuarios. Solo admin."""
+    require_admin(p)
+    _require_supabase()
+    email = req.email.strip().lower()
+    if "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(400, "Email inválido.")
+    if _db(users_repo.get_by_email, email):
+        raise HTTPException(409, "Ya existe una cuenta con ese email.")
+    h, salt = auth_lib.hash_password(req.password)
+    u = _db(users_repo.create_user, email=email, name=req.name, password_hash=h,
+            password_salt=salt, role="trabajador", status="approved")
+    return {"ok": True, "user": users_repo.public_view(u)}
+
+
+class GrantModuleRequest(BaseModel):
+    module: str
+
+
+@app.get("/admin/roles")
+def list_module_roles(p: Principal = Depends(get_principal)):
+    """Todos los grants de módulo agrupados por usuario. Solo admin."""
+    require_admin(p)
+    _require_supabase()
+    return _db(permissions_repo.list_all)
+
+
+@app.post("/users/{user_id}/roles")
+def grant_module_role(user_id: str, req: GrantModuleRequest, p: Principal = Depends(get_principal)):
+    """Otorga a `user_id` acceso a un módulo. Solo admin."""
+    require_admin(p)
+    _require_supabase()
+    if req.module not in permissions_repo.MODULES:
+        raise HTTPException(400, f"Módulo desconocido: {req.module}")
+    _db(permissions_repo.grant, user_id, req.module, p.user_id)
+    return {"ok": True}
+
+
+@app.delete("/users/{user_id}/roles/{module}")
+def revoke_module_role(user_id: str, module: str, p: Principal = Depends(get_principal)):
+    """Revoca a `user_id` el acceso a un módulo. Solo admin."""
+    require_admin(p)
+    _require_supabase()
+    _db(permissions_repo.revoke, user_id, module)
+    return {"ok": True}
 
 
 # ── Catálogo ─────────────────────────────────────────────────────────────────
@@ -790,10 +964,12 @@ async def extract(files: list[UploadFile] = File(...), p: Principal = Depends(ge
 @app.post("/propuestas", response_model=CreateProposalResponse, status_code=202)
 def create_proposal(req: CreateProposalRequest, background: BackgroundTasks,
                     p: Principal = Depends(get_principal)):
+    require_doc_module(p, req.doc_type_key or "auto")
     if not config.ANTHROPIC_API_KEY:
         raise HTTPException(500, "ANTHROPIC_API_KEY no configurada en el servidor")
     session_id = uuid.uuid4().hex[:8]
     owner = p.user_id  # None si es la clave maestra
+    is_admin, allowed_modules = p.is_admin, list(p.modules)
 
     def _run():
         try:
@@ -802,6 +978,7 @@ def create_proposal(req: CreateProposalRequest, background: BackgroundTasks,
                 doc_type_key=(req.doc_type_key or "auto"),
                 template_text=req.template_text, support_docs=req.support_docs,
                 session_id=session_id, owner_user_id=owner,
+                is_admin=is_admin, allowed_modules=allowed_modules,
             )
         except Exception:
             pass
@@ -816,6 +993,7 @@ def buscar_oportunidades(req: ScoutRequest, background: BackgroundTasks,
                          p: Principal = Depends(get_principal)):
     """Detecta el TOP-N de oportunidades y arma un reporte con calificación
     ponderada (NO genera propuestas). Luego se eligen con POST /generar."""
+    require_module(p, "proyectos")
     if not config.ANTHROPIC_API_KEY:
         raise HTTPException(500, "ANTHROPIC_API_KEY no configurada en el servidor")
     session_id = uuid.uuid4().hex[:8]
@@ -906,6 +1084,7 @@ def generar_desde_seleccion(session_id: str, req: GenerateRequest, background: B
                             p: Principal = Depends(get_principal)):
     """Con el visto bueno del usuario: por cada oportunidad elegida lanza la
     generación de la propuesta completa (enfocada en esa entidad y sus requisitos)."""
+    require_module(p, "proyectos")
     if not config.ANTHROPIC_API_KEY:
         raise HTTPException(500, "ANTHROPIC_API_KEY no configurada en el servidor")
     row = _owned_row(session_id, p)
@@ -914,6 +1093,7 @@ def generar_desde_seleccion(session_id: str, req: GenerateRequest, background: B
     if not opps:
         raise HTTPException(409, "Esta sesión no tiene oportunidades para generar.")
     owner = row.get("owner_user_id")
+    is_admin, allowed_modules = p.is_admin, list(p.modules)
 
     created: list[CreateProposalResponse] = []
     for idx in req.selected:
@@ -932,7 +1112,8 @@ def generar_desde_seleccion(session_id: str, req: GenerateRequest, background: B
         def _run(new_id=new_id, user_input=user_input, mode=mode, opp=opp):
             try:
                 run_pipeline(user_input=user_input, mode=mode, doc_type_key="propuesta",
-                             session_id=new_id, owner_user_id=owner, seed_opportunity=opp)
+                             session_id=new_id, owner_user_id=owner, seed_opportunity=opp,
+                             is_admin=is_admin, allowed_modules=allowed_modules)
             except Exception:
                 pass
 
@@ -1050,6 +1231,7 @@ def get_proposal_pdf(session_id: str, p: Principal = Depends(get_principal)):
 def retry_proposal(session_id: str, background: BackgroundTasks,
                    p: Principal = Depends(get_principal)):
     row = _owned_row(session_id, p)
+    require_doc_module(p, row.get("doc_type_key") or "auto")
     if not config.ANTHROPIC_API_KEY:
         raise HTTPException(500, "ANTHROPIC_API_KEY no configurada en el servidor")
     user_input = row["user_input"]
@@ -1058,12 +1240,14 @@ def retry_proposal(session_id: str, background: BackgroundTasks,
     template_text = row.get("template_text") or ""
     support_docs = [(d.get("name"), d.get("text")) for d in (row.get("support_docs") or [])]
     owner = row.get("owner_user_id")
+    is_admin, allowed_modules = p.is_admin, list(p.modules)
 
     def _run():
         try:
             run_pipeline(user_input=user_input, mode=mode, doc_type_key=doc_type_key,
                          template_text=template_text, support_docs=support_docs,
-                         session_id=session_id, owner_user_id=owner)
+                         session_id=session_id, owner_user_id=owner,
+                         is_admin=is_admin, allowed_modules=allowed_modules)
         except Exception:
             pass
 
@@ -1150,6 +1334,7 @@ def oficios_tipos(p: Principal = Depends(get_principal)):
 @app.post("/oficios", status_code=201)
 def crear_oficio(req: OficioRequest, p: Principal = Depends(get_principal)):
     """Genera un oficio/petición y lo guarda en la base de datos."""
+    require_module(p, "oficios")
     _require_supabase()
     from agents.oficio import generate
     from db import oficio_repo
@@ -1408,6 +1593,7 @@ def captacion_zonas(p: Principal = Depends(get_principal)):
 def buscar_mercado(req: BuscarMercadoRequest, background: BackgroundTasks,
                    p: Principal = Depends(get_principal)):
     """Lanza búsqueda de mercado en background. Devuelve job_id para polling."""
+    require_module(p, "captacion")
     import threading
     _prune_captacion_jobs()
     job_id = str(uuid.uuid4())
@@ -1476,6 +1662,7 @@ class ImportarProspectosRequest(BaseModel):
 @app.post("/prospectos/importar", status_code=201)
 def importar_prospectos(req: ImportarProspectosRequest, p: Principal = Depends(get_principal)):
     """Importa una lista de prospectos directamente (sin búsqueda web)."""
+    require_module(p, "captacion")
     _require_supabase()
     if not p.user_id:
         raise HTTPException(403, "Requiere cuenta de usuario.")
@@ -1506,6 +1693,7 @@ def listar_prospectos(
 @app.patch("/prospectos/{prospecto_id}")
 def actualizar_prospecto(prospecto_id: str, req: UpdateProspectoRequest,
                          p: Principal = Depends(get_principal)):
+    require_module(p, "captacion")
     _require_supabase()
     if not p.user_id:
         raise HTTPException(403, "Requiere cuenta de usuario.")
@@ -1519,7 +1707,11 @@ def actualizar_prospecto(prospecto_id: str, req: UpdateProspectoRequest,
 
 @app.post("/prospectos/{prospecto_id}/convertir", status_code=201)
 def convertir_a_cliente(prospecto_id: str, p: Principal = Depends(get_principal)):
-    """Convierte un prospecto en cliente."""
+    """Convierte un prospecto en cliente: crea una fila real en clientes, así que
+    exige ambos módulos — quien solo prospecta (captacion) no debe poder crear
+    clientes de facto por esta vía sin tener también el módulo clientes."""
+    require_module(p, "captacion")
+    require_module(p, "clientes")
     _require_supabase()
     if not p.user_id:
         raise HTTPException(403, "Requiere cuenta de usuario.")
@@ -1533,6 +1725,7 @@ def convertir_a_cliente(prospecto_id: str, p: Principal = Depends(get_principal)
 
 @app.delete("/prospectos/{prospecto_id}")
 def eliminar_prospecto(prospecto_id: str, p: Principal = Depends(get_principal)):
+    require_module(p, "captacion")
     _require_supabase()
     if not p.user_id:
         raise HTTPException(403, "Requiere cuenta de usuario.")
@@ -1552,6 +1745,7 @@ def listar_clientes(
     limit: int = Query(200, ge=1, le=500),
     p: Principal = Depends(get_principal),
 ):
+    require_module(p, "clientes")
     _require_supabase()
     from db import captacion_repo
     return captacion_repo.list_clientes(owner_user_id=p.owner_filter(), estado=estado, limit=limit)
@@ -1559,6 +1753,7 @@ def listar_clientes(
 
 @app.post("/clientes", status_code=201)
 def crear_cliente(req: SaveClienteRequest, p: Principal = Depends(get_principal)):
+    require_module(p, "clientes")
     _require_supabase()
     if not p.user_id:
         raise HTTPException(403, "Requiere cuenta de usuario.")
@@ -1571,6 +1766,7 @@ def crear_cliente(req: SaveClienteRequest, p: Principal = Depends(get_principal)
 @app.patch("/clientes/{cliente_id}")
 def actualizar_cliente(cliente_id: str, req: UpdateClienteRequest,
                        p: Principal = Depends(get_principal)):
+    require_module(p, "clientes")
     _require_supabase()
     if not p.user_id:
         raise HTTPException(403, "Requiere cuenta de usuario.")
@@ -1584,6 +1780,7 @@ def actualizar_cliente(cliente_id: str, req: UpdateClienteRequest,
 
 @app.delete("/clientes/{cliente_id}")
 def eliminar_cliente(cliente_id: str, p: Principal = Depends(get_principal)):
+    require_module(p, "clientes")
     _require_supabase()
     if not p.user_id:
         raise HTTPException(403, "Requiere cuenta de usuario.")
