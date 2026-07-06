@@ -1075,9 +1075,9 @@ def retry_proposal(session_id: str, background: BackgroundTasks,
 def cancel_proposal(session_id: str, p: Principal = Depends(get_principal)):
     """Cancela un trabajo en cola/en curso (lo marca como cancelado; conserva el registro)."""
     from db import repository
-    _owned_row(session_id, p)
+    row = _owned_row(session_id, p)
     try:
-        ok = repository.cancel_session(session_id)
+        ok = repository.cancel_session(session_id, row_uuid=row.get("id"))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"No se pudo cancelar: {type(e).__name__}: {e}")
     if not ok:
@@ -1103,9 +1103,9 @@ def pause_proposal(session_id: str, p: Principal = Depends(get_principal)):
 def delete_proposal(session_id: str, p: Principal = Depends(get_principal)):
     """Borra el entregable del usuario (inconcluso o no): sesión + borradores + revisiones."""
     from db import repository
-    _owned_row(session_id, p)  # verifica existencia y propiedad
+    row = _owned_row(session_id, p)  # verifica existencia y propiedad
     try:
-        ok = repository.delete_session(session_id)
+        ok = repository.delete_session(session_id, row_uuid=row.get("id"))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"No se pudo borrar: {type(e).__name__}: {e}")
     if not ok:

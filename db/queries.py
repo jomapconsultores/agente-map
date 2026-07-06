@@ -6,6 +6,7 @@ y desde aquí las puedes listar/recuperar para revisar o reanalizar.
 from __future__ import annotations
 
 import datetime
+import concurrent.futures
 from typing import Any, Optional
 
 from utils.supabase_client import get_client
@@ -109,24 +110,23 @@ def get_session(session_id: str) -> Optional[dict[str, Any]]:
     row = sess.data[0]
     row_uuid = row["id"]
 
-    versions = (
-        sb.table("proposal_versions")
-        .select("cycle, content, char_count, created_at")
-        .eq("session_id", row_uuid)
-        .order("cycle")
-        .execute()
-        .data
-        or []
-    )
-    reviews = (
-        sb.table("reviews")
-        .select("*")
-        .eq("session_id", row_uuid)
-        .order("cycle")
-        .execute()
-        .data
-        or []
-    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        versions_future = executor.submit(
+            lambda: sb.table("proposal_versions")
+            .select("cycle, content, char_count, created_at")
+            .eq("session_id", row_uuid)
+            .order("cycle")
+            .execute()
+        )
+        reviews_future = executor.submit(
+            lambda: sb.table("reviews")
+            .select("*")
+            .eq("session_id", row_uuid)
+            .order("cycle")
+            .execute()
+        )
+        versions = versions_future.result().data or []
+        reviews = reviews_future.result().data or []
     row["proposal_versions"] = versions
     row["reviews"] = reviews
     return _reconcile_stale_running(row)

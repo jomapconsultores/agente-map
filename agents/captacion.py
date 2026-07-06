@@ -16,6 +16,7 @@ CUMPLIMIENTO LOPDP (Ley Orgánica de Protección de Datos Personales, RO 459,
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import config
 from agents import llm
@@ -138,11 +139,10 @@ def buscar_mercado(
 
     zonas_activas = [z for z in ZONAS_ECUADOR if z["nivel"] in zonas_solicitadas]
     todos_prospectos: list[dict] = []
-    zonas_buscadas: list[str] = []
+    zonas_buscadas: list[str] = [z["zona"] for z in zonas_activas]
 
-    for zona_info in zonas_activas:
+    def _buscar_zona(zona_info: dict) -> tuple[dict, list[dict]]:
         zona = zona_info["zona"]
-        zonas_buscadas.append(zona)
         queries = _queries_para_zona(producto, zona)
 
         # Ejecutar las primeras 2 queries por zona (no sobrecargar)
@@ -155,13 +155,24 @@ def buscar_mercado(
                 pass
 
         if not raw_results_parts:
-            continue
+            return zona_info, []
 
         raw_combined = "\n\n---\n\n".join(raw_results_parts)
         prospectos = _extract_prospectos(raw_combined, producto, zona, api_key)
+        return zona_info, prospectos
 
-        # Normalizar y limitar
-        seen = set()
+    if zonas_activas:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(6, max(1, len(zonas_activas)))
+        ) as executor:
+            resultados_por_zona = list(executor.map(_buscar_zona, zonas_activas))
+    else:
+        resultados_por_zona = []
+
+    # Normalizar y limitar (mismo orden de zonas que antes, ya que executor.map
+    # preserva el orden de zonas_activas)
+    seen = set()
+    for zona_info, prospectos in resultados_por_zona:
         for p in prospectos:
             key = (p.get("nombre") or "").lower().strip()
             if key and key not in seen and len(todos_prospectos) < max_por_zona * len(zonas_activas):
