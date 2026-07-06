@@ -16,6 +16,7 @@ esta ruta de API (el tool-use es exclusivo del SDK de Anthropic).
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
 
@@ -209,10 +210,13 @@ def _gather_evidence(session: ProjectSession, seed: dict | None = None) -> str:
 
     # En modo URL: descarga primero los enlaces entregados por el usuario.
     if mode == "url":
-        urls = re.findall(r"https?://\S+", topic)
-        for u in urls[:6]:
-            page = execute_fetch_page(u)
-            pieces.append(f"=== PÁGINA ENTREGADA: {u} ===\n{_clip(page, 6000)}")
+        urls = re.findall(r"https?://\S+", topic)[:6]
+        if urls:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+                futures = {u: executor.submit(execute_fetch_page, u) for u in urls}
+                for u in urls:
+                    page = futures[u].result()
+                    pieces.append(f"=== PÁGINA ENTREGADA: {u} ===\n{_clip(page, 6000)}")
 
     # Oportunidad elegida (scouting → generación): foco en esa entidad.
     if seed:

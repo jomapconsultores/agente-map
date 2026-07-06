@@ -15,6 +15,7 @@ Estándar de calidad:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 
 import config
@@ -247,7 +248,7 @@ def run(session: ProjectSession, api_key: str | None = None) -> list[dict]:
     # de red de la verificación FEHACIENTE completa (la misma que ya usa
     # core/pipeline.py para el flujo de análisis único), en vez de confiar solo en
     # lo que el LLM constructor afirmó sobre sus propias fuentes y fechas.
-    for o in cleaned:
+    def _verify_opportunity(o: dict) -> dict:
         try:
             from utils.url_verifier import enrich_evidence_sources
             if o.get("evidence_sources"):
@@ -287,7 +288,7 @@ def run(session: ProjectSession, api_key: str | None = None) -> list[dict]:
                 }
                 o["feasibility_breakdown"] = fb
                 o["weighted_score"] = 0.0
-                continue
+                return o
             elif dl.get("discrepancia"):
                 # La fecha real de la página oficial difiere de la que reportó el
                 # LLM (ambas vigentes, pero no coinciden): bajar deadline_feasibility.
@@ -303,6 +304,11 @@ def run(session: ProjectSession, api_key: str | None = None) -> list[dict]:
                     o["feasibility_breakdown"], o.get("winning_probability", 0))
         except Exception:
             pass  # best-effort: nunca tumbar el scouting por un fallo de red
+        return o
+
+    if cleaned:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(cleaned))) as executor:
+            cleaned = list(executor.map(_verify_opportunity, cleaned))
 
     # Tras la revisión de discrepancia el score pudo bajar: re-aplicar filtro/orden.
     cleaned = [o for o in cleaned if o.get("weighted_score", 0) >= _MIN_WEIGHTED_SCORE]
