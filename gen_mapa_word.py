@@ -153,7 +153,6 @@ tabla(
         ["agents/analyst.py", "Agente 1 — Analista de viabilidad + buscador de oportunidades (Claude)"],
         ["agents/classifier.py", "Agente 0 — Detecta el tipo de documento y arma el \"brief\""],
         ["agents/writer.py", "Agente 2 — Redactor (constructor rota: Mistral→Codestral→DeepSeek)"],
-        ["agents/peer.py", "Consenso de los 3 constructores antes de pasar a Claude"],
         ["agents/reviewer.py", "Agente 3 — Revisor de calidad (Claude), aplica regla 90/90"],
         ["agents/financial.py", "Agente 4 — Estructura presupuesto, marco lógico y cronograma"],
         ["agents/llm.py", "Capa que habla con todos los proveedores (con reintentos y respaldo)"],

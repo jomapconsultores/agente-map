@@ -7,6 +7,7 @@ fpdf2>=2.7.0
 pypdf>=4.3.0
 rich>=13.7.0
 supabase>=2.15.0
+psycopg2-binary>=2.9
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9

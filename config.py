@@ -185,9 +185,6 @@ SECOND_OPINION_PROVIDER = os.getenv("SECOND_OPINION_PROVIDER", "deepseek")
 
 # ── Pipeline ───────────────────────────────────────────────────────────────
 MAX_REVIEW_CYCLES = 5
-# Subciclos de consenso del equipo constructor (1°,2°,3°) antes de pasar a Claude.
-# En cada subciclo los 3 revisan; si hay faltantes, el redactor mejora y se revisa otra vez.
-MAX_PEER_SUBCYCLES = int(os.getenv("MAX_PEER_SUBCYCLES", "3"))
 # Verificación exigente: se requiere ≥90 en CADA elemento Y ≥90 global.
 APPROVAL_THRESHOLD = 90       # Score global mínimo para aprobar propuesta (0-100)
 ELEMENT_THRESHOLD = 90        # Score mínimo EXIGIDO en cada criterio individual (0-100)

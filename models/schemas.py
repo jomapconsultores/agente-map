@@ -178,8 +178,6 @@ class ProjectSession:
 
     # Trazabilidad de constructores: [{cycle, requested, used}] por ciclo de redacción
     builder_log: list = field(default_factory=list)
-    # Consenso del equipo constructor (1°,2°,3°) por ciclo: [{cycle, verdicts:[...]}]
-    peer_log: list = field(default_factory=list)
 
     # ── Flujo por fases con gates ≥90 y reinicio al inicio ──────────────────
     # Intento actual del ciclo completo (1..MAX_PIPELINE_RESTARTS).
