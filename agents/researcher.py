@@ -377,8 +377,20 @@ def build_brief(session: ProjectSession, doc_type_key: str,
     provider = config.ROLE_RESEARCH
     dt = get_doc_type(doc_type_key)
     default_fmt = dt.format.as_dict()
-    evidence = _gather_evidence(session)
-    _beat(session, "Analizando la evidencia recolectada", "Definiendo estructura y requisitos del documento")
+    # Documentos AUTOCONTENIDOS (cotización, proforma, informe, carta, oficio,
+    # documento personalizado): la solicitud del usuario y sus documentos de apoyo
+    # ya traen lo necesario. _gather_evidence hace una búsqueda web orientada a
+    # FINANCIAMIENTO (opportunity_queries) que contamina el brief con contenido
+    # off-topic — p. ej. una cotización de software se volvía un "mapeo de
+    # convocatorias de financiamiento". Para estos tipos se OMITE la búsqueda y se
+    # redacta directamente desde el pedido: más rápido y on-topic.
+    self_contained = dt.key in {"generico", "legal_tecnico"}
+    if self_contained:
+        evidence = ""
+    else:
+        evidence = _gather_evidence(session)
+        _beat(session, "Analizando la evidencia recolectada",
+              "Definiendo estructura y requisitos del documento")
     support_join = "\n\n".join(
         f"=== {n} ===\n{_clip(t, 3500)}" for n, t in (session.support_docs or [])
     )
@@ -402,9 +414,11 @@ PLANTILLA/MODELO OPCIONAL A IMITAR:
 DOCUMENTOS DE APOYO:
 {support_join or "(ninguno)"}
 
-{_clip(evidence, 24000)}
+{_clip(evidence, 24000) if evidence else "(sin búsqueda web: este documento se define a partir de la solicitud del usuario y sus documentos de apoyo)"}
 
-Con base en la evidencia anterior, responde ÚNICAMENTE con este JSON (sin texto extra):
+Céntrate ESTRICTAMENTE en lo que pide la SOLICITUD DEL USUARIO (no cambies de tema
+ni introduzcas financiamiento/convocatorias si el usuario no lo pidió). Responde
+ÚNICAMENTE con este JSON (sin texto extra):
 
 {{
   "title": "<título preciso del entregable>",
@@ -430,21 +444,35 @@ Con base en la evidencia anterior, responde ÚNICAMENTE con este JSON (sin texto
   "academic_level": "<SOLO si el tipo de documento es académico (p.ej. tesis): 'colegio'|'pregrado'|'maestria'|'doctorado'|'postdoctorado' según lo que indique la solicitud del usuario; si no aplica o no se puede determinar, usa 'pregrado'>"
 }}
 """
+    # El brief es un JSON compacto (secciones, formato, requisitos): 16k tokens de
+    # salida invitaban a que el modelo divagara y TRUNCARA el JSON a mitad → parse
+    # fallido. 6k basta de sobra y reduce latencia y riesgo de truncamiento.
+    #
+    # ROTA de proveedor ante un fallo de PARSEO (no solo ante error de red):
+    # algunos modelos (p. ej. Mistral en briefs) divagan y truncan el JSON, lo que
+    # NO lanza LLMError, así que complete_builder no rotaba solo. Probar el
+    # siguiente constructor rescata en segundos en vez de reintentar al mismo.
+    provider_order = [provider] + [p for p in config.BUILDER_ROTATION if p != provider]
     last_err2: Exception | None = None
     raw, used, data = "", "", {}
-    for _att in range(2):
+    for prov in provider_order:
         try:
-            raw, used = llm.complete_builder(
-                provider, system=_BRIEF_SYSTEM, prompt=prompt,
-                max_tokens=MAX_TOKENS_ANALYST, anthropic_key=api_key,
-                temperature=0.3 + _att * 0.15)
+            raw = llm.complete(prov, system=_BRIEF_SYSTEM, prompt=prompt,
+                               max_tokens=6000, temperature=0.3)
             data = _parse_json(raw)
-            last_err2 = None
-            break
+            if data:
+                used = prov
+                last_err2 = None
+                break
         except Exception as e:
             last_err2 = e
-    if last_err2:
-        raise last_err2
+            continue
+    # Si NINGÚN proveedor entregó un JSON parseable, NO abortes la generación: cae a
+    # un brief mínimo derivado del tipo + la solicitud del usuario, para que el
+    # pipeline pueda redactar igual (garantía de entrega).
+    if not data:
+        from core.pipeline import _fallback_brief
+        return _fallback_brief(session, dt)
 
     fmt = FormatSpec.from_dict({**default_fmt, **(data.get("format_spec") or {})})
     academic_level = str(data.get("academic_level") or "").strip().lower()
