@@ -1094,7 +1094,7 @@ def _add_statistics_sheets(wb, brief) -> int:
 
         elif t == "groups":
             groups = list((d.get("groups") or {}).items())
-            kk = len(groups); maxlen = max(len(v) for _, v in groups)
+            kk = len(groups); maxlen = max((len(v) for _, v in groups), default=0)
             ranges = []
             for gi, (gname, gvals) in enumerate(groups):
                 col = gi + 1; L = gcl(col)
