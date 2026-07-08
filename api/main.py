@@ -40,6 +40,17 @@ from models.doc_types import get_doc_type, list_doc_types, list_modules
 from models.schemas import DocumentBrief, FinancialPackage, ProjectSession
 
 
+import sentry_sdk
+_sentry_dsn = os.environ.get("SENTRY_DSN", "")
+if _sentry_dsn:
+    sentry_sdk.init(
+        dsn=_sentry_dsn,
+        environment=os.environ.get("ENVIRONMENT", "production"),
+        traces_sample_rate=float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0")),
+        send_default_pii=False,
+    )
+
+
 app = FastAPI(
     title="agente_map API",
     description="Pipeline multiagente multiusuario de entregables de alto nivel.",
