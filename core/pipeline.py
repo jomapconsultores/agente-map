@@ -190,6 +190,27 @@ def _research_content(session: ProjectSession) -> str:
     return ""
 
 
+def _fallback_brief(session: ProjectSession, doc_type) -> "DocumentBrief":
+    """Brief mínimo construido solo desde el tipo de documento y la solicitud del
+    usuario. GARANTIZA que siempre se pueda redactar un entregable aunque la fase de
+    investigación haya fallado o su gate nunca haya aprobado — el sistema nunca debe
+    quedarse sin producir un documento."""
+    from models.schemas import DocumentBrief
+    from models.doc_types import all_criteria
+    return DocumentBrief(
+        doc_type_key=doc_type.key,
+        title=(session.user_input or doc_type.name).strip()[:120] or doc_type.name,
+        language="es",
+        personas=list(doc_type.personas),
+        sections=list(doc_type.sections),
+        format_spec=doc_type.format.as_dict(),
+        instructions=(session.user_input or "").strip(),
+        needs_budget_excel=doc_type.needs_budget_excel,
+        evaluation_criteria=all_criteria(doc_type),
+        rigor_notes=doc_type.rigor_notes,
+    )
+
+
 def run_scouting(
     *,
     user_input: str,
@@ -404,9 +425,21 @@ def run_pipeline(
                     _log(session_id, "fase1",
                          f"Error en investigación (ciclo {attempt}) — reintentando",
                          "⚠️", "warning", str(research_err)[:200])
-                    if attempt >= MAX_PIPELINE_RESTARTS:
-                        raise
-                    continue  # reintenta el ciclo completo
+                    if attempt < MAX_PIPELINE_RESTARTS:
+                        continue  # reintenta el ciclo completo
+                    # Último ciclo: la investigación falló, pero igual hay que ENTREGAR.
+                    # Construye un brief mínimo desde el tipo + la solicitud del usuario
+                    # y sale del loop hacia la garantía de entrega (redacta de todos modos).
+                    if session.brief is None:
+                        session.brief = _fallback_brief(session, doc_type)
+                    if not session.inconclusive_reason:
+                        session.inconclusive_reason = (
+                            "La investigación web falló; el documento se redactó con la "
+                            "información disponible. Revísalo y complétalo antes de usarlo.")
+                    _log(session_id, "fase1",
+                         "Investigación no disponible — se redactará con un brief mínimo "
+                         "(garantía de entrega)", "⚠️", "warning")
+                    break  # → entrega garantizada tras el loop
 
                 # ── VERIFICACIÓN FEHACIENTE DE URLS ──────────────────────────
                 # Comprueba HTTP real de cada fuente citada y del funder_url.
@@ -472,27 +505,41 @@ def run_pipeline(
                 session.phase_reviews.append({"attempt": attempt, **g1})
                 if not g1["passed"]:
                     pending_corrections = (g1.get("critical") or []) + (g1.get("issues") or [])
-                    _log(session_id, "gate1", f"Gate 1 no aprobado — reiniciando{cycle_label}",
-                         "🔄", "warning",
-                         f"Puntaje: {g1.get('score', '—')}/100 · " +
-                         "; ".join(pending_corrections[:3] or [g1.get("recommendation", "")])[:200])
-                    continue  # VUELVE AL INICIO: reinvestiga
-                _log(session_id, "gate1", f"Gate 1 aprobado{cycle_label}", "✅", "done",
-                     f"Puntaje: {g1.get('score', '—')}/100")
-                _keep_quality_notes(session, "Gate 1 — investigación", g1)
-                research_approved = True
-                session.research_approved = True
-                # Checkpoint best-effort: antes solo se persistía en pausa manual
-                # explícita. Un crash/redeploy a mitad del loop (hasta 10 ciclos)
-                # perdía la investigación ya aprobada y /retry la repetía desde
-                # cero. Con MAX_PIPELINE_RESTARTS=10 el costo de NO checkpointear
-                # aquí creció; guardar solo analysis/brief (repository.save_session,
-                # no utils.output.save_session — este último además escribe
-                # Word/Excel a disco en cada ciclo, que sería un desperdicio aquí).
-                try:
-                    repository.save_session(session)
-                except Exception:
-                    pass
+                    if attempt < MAX_PIPELINE_RESTARTS:
+                        _log(session_id, "gate1", f"Gate 1 no aprobado — reiniciando{cycle_label}",
+                             "🔄", "warning",
+                             f"Puntaje: {g1.get('score', '—')}/100 · " +
+                             "; ".join(pending_corrections[:3] or [g1.get("recommendation", "")])[:200])
+                        continue  # VUELVE AL INICIO: reinvestiga
+                    # Último ciclo: NO bloquear la entrega. Acepta la mejor investigación
+                    # lograda y procede a redactar para SIEMPRE entregar un documento.
+                    # (No se marca research_approved: si el usuario reintenta luego, la
+                    # investigación sí se repetirá para intentar superar el gate.)
+                    _log(session_id, "gate1",
+                         f"Gate 1 sin aprobar en el último ciclo — se continúa para "
+                         f"entregar el mejor documento posible{cycle_label}", "⚠️", "warning",
+                         f"Puntaje: {g1.get('score', '—')}/100")
+                    if not session.inconclusive_reason:
+                        session.inconclusive_reason = (
+                            "La investigación no superó el gate de calidad; el documento se "
+                            "entrega para revisión manual.")
+                else:
+                    _log(session_id, "gate1", f"Gate 1 aprobado{cycle_label}", "✅", "done",
+                         f"Puntaje: {g1.get('score', '—')}/100")
+                    _keep_quality_notes(session, "Gate 1 — investigación", g1)
+                    research_approved = True
+                    session.research_approved = True
+                    # Checkpoint best-effort: antes solo se persistía en pausa manual
+                    # explícita. Un crash/redeploy a mitad del loop (hasta 10 ciclos)
+                    # perdía la investigación ya aprobada y /retry la repetía desde
+                    # cero. Con MAX_PIPELINE_RESTARTS=10 el costo de NO checkpointear
+                    # aquí creció; guardar solo analysis/brief (repository.save_session,
+                    # no utils.output.save_session — este último además escribe
+                    # Word/Excel a disco en cada ciclo, que sería un desperdicio aquí).
+                    try:
+                        repository.save_session(session)
+                    except Exception:
+                        pass
             else:
                 _log(session_id, "fase1", f"Investigación ya aprobada — se reutiliza{cycle_label}",
                      "🌐", "done", "Gate 1 ya había pasado; no se repite la búsqueda web")
@@ -600,6 +647,33 @@ def run_pipeline(
             # No aprobó el 90/90 → VUELVE AL INICIO (reinvestiga)
 
         session.approved = approved
+
+        # ── GARANTÍA DE ENTREGA ──────────────────────────────────────────────
+        # Si ningún ciclo llegó siquiera a redactar (Gate 1 nunca aprobó y el techo
+        # de tiempo cortó el loop antes del último ciclo, o la investigación falló),
+        # produce igualmente el mejor documento posible: el sistema NUNCA debe
+        # devolver "nada" ante una solicitud válida.
+        if best["proposal"] is None and not session.final_proposal:
+            if session.brief is None:
+                session.brief = _fallback_brief(session, doc_type)
+                _enrich_brief_with_intake(session)
+            try:
+                _log(session_id, "entrega",
+                     "Generando el entregable final (garantía de entrega)", "📝", "running",
+                     "No se superaron los gates de calidad dentro del tiempo disponible; "
+                     "se entrega el mejor documento posible para revisión manual")
+                proposal = writer.run(session, pending_corrections, api_key, provider=ROLE_WRITER)
+                session.proposal_versions.append(proposal)
+                session.final_proposal = proposal
+                best = {"score": 0.0, "proposal": proposal, "financial": session.financial}
+                if not session.inconclusive_reason:
+                    session.inconclusive_reason = (
+                        "Entregado sin superar todos los gates de calidad; revísalo antes de usarlo.")
+                _log(session_id, "entrega", "Entregable generado", "📝", "done",
+                     f"{len(proposal):,} caracteres")
+            except Exception as gen_err:  # noqa: BLE001
+                _log(session_id, "entrega", "No se pudo generar el entregable de respaldo",
+                     "⚠️", "warning", str(gen_err)[:200])
 
         # Si ningún intento alcanzó el 90, entrega la MEJOR versión (inconclusa).
         if not approved and best["proposal"] is not None:

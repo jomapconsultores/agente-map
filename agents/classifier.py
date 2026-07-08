@@ -54,7 +54,18 @@ PLANTILLA/MODELO (opcional):
 DOCUMENTOS DE APOYO (opcional):
 {support_join or "(ninguno)"}
 
-Devuelve ÚNICAMENTE la clave del tipo más adecuado (p. ej. articulo_cientifico).
+REGLAS DE DESAMBIGUACIÓN (aplícalas antes de decidir):
+- Una cotización, proforma, oferta económica, presupuesto de servicios, factura, o un
+  "desarrollo a medida" para un cliente NO es un artículo científico ni una tesis. Si es
+  una contratación/adquisición formal usa 'tdr'; si es un documento técnico/comercial usa
+  'legal_tecnico'; si no encaja, usa 'generico'.
+- 'articulo_cientifico', 'tesis' y 'peer_review' SOLO cuando el usuario pide de forma
+  explícita un trabajo académico/científico (paper, tesis, revisión por pares).
+- 'propuesta' SOLO para financiamiento NO reembolsable (cooperación internacional,
+  convocatorias, donantes, subvenciones).
+- Ante cualquier duda, prefiere 'generico' antes que forzar un tipo académico o de propuesta.
+
+Devuelve ÚNICAMENTE la clave del tipo más adecuado (p. ej. legal_tecnico).
 Si nada encaja con claridad, responde: generico
 """
     try:

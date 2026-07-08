@@ -40,15 +40,20 @@ from models.doc_types import get_doc_type, list_doc_types, list_modules
 from models.schemas import DocumentBrief, FinancialPackage, ProjectSession
 
 
-import sentry_sdk
-_sentry_dsn = os.environ.get("SENTRY_DSN", "")
-if _sentry_dsn:
-    sentry_sdk.init(
-        dsn=_sentry_dsn,
-        environment=os.environ.get("ENVIRONMENT", "production"),
-        traces_sample_rate=float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0")),
-        send_default_pii=False,
-    )
+# Observabilidad opcional: nunca debe tumbar el arranque de la API si el paquete
+# no está instalado o el DSN está mal — es puramente best-effort.
+try:
+    import sentry_sdk
+    _sentry_dsn = os.environ.get("SENTRY_DSN", "")
+    if _sentry_dsn:
+        sentry_sdk.init(
+            dsn=_sentry_dsn,
+            environment=os.environ.get("ENVIRONMENT", "production"),
+            traces_sample_rate=float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0")),
+            send_default_pii=False,
+        )
+except Exception as _sentry_err:  # noqa: BLE001
+    print(f"[sentry] observabilidad deshabilitada: {_sentry_err}")
 
 
 app = FastAPI(
@@ -1247,7 +1252,12 @@ def retry_proposal(session_id: str, background: BackgroundTasks,
         raise HTTPException(500, "ANTHROPIC_API_KEY no configurada en el servidor")
     user_input = row["user_input"]
     mode = row.get("input_mode") or "text"
-    doc_type_key = row.get("doc_type_key") or "auto"
+    # Si el intento previo NO llegó a aprobarse, vuelve a CLASIFICAR desde cero
+    # ("auto") en vez de congelar el tipo detectado antes: una mala clasificación
+    # previa (p. ej. una cotización marcada como "artículo científico") hacía que
+    # el reintento repitiera el mismo error de origen y nunca produjera algo útil.
+    # Para una sesión ya aprobada se respeta el tipo con el que se generó.
+    doc_type_key = (row.get("doc_type_key") or "auto") if row.get("approved") else "auto"
     template_text = row.get("template_text") or ""
     support_docs = [(d.get("name"), d.get("text")) for d in (row.get("support_docs") or [])]
     owner = row.get("owner_user_id")
