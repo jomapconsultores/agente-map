@@ -31,6 +31,18 @@ from config import (
     MAX_TOKENS_ANALYST, SEARCH_FETCH_PAGES,
 )
 
+
+def _beat(session: ProjectSession, label: str, detail: str = "") -> None:
+    """Latido de progreso best-effort: mantiene fresco el heartbeat en la BD
+    durante fases largas (búsqueda web + análisis LLM) para que el watchdog de
+    'sin actividad' NO mate una sesión que en realidad sigue trabajando."""
+    try:
+        from db import repository
+        repository.update_progress(session.session_id, phase="fase1",
+                                   label=label, icon="🌐", status="running", detail=detail)
+    except Exception:
+        pass
+
 # ── System prompt para LLMs no-Claude ────────────────────────────────────────
 # No menciona herramientas (deep_search/fetch_page/web_search) porque este
 # proveedor recibe la evidencia ya recolectada como texto, no a través de
@@ -256,6 +268,7 @@ def _gather_evidence(session: ProjectSession, seed: dict | None = None) -> str:
         evidence = json.dumps({"error": f"deep_search falló: {ex}", "queries": base},
                               ensure_ascii=False)
     pieces.append("=== EVIDENCIA DE BÚSQUEDA WEB (deep_search) ===\n" + _clip(evidence, 28000))
+    _beat(session, "Ampliando la búsqueda con consultas dirigidas", "Segunda oleada de fuentes")
 
     try:
         proposed = _propose_queries(provider, topic, [])
@@ -281,6 +294,7 @@ def run(session: ProjectSession, api_key: str | None = None,
     centra en ESA convocatoria con sus requisitos reales (no re-busca otra)."""
     provider = config.ROLE_RESEARCH
     evidence = _gather_evidence(session, seed=seed)
+    _beat(session, "Analizando la evidencia recolectada", "Evaluando viabilidad y financiador")
 
     seed_block = ""
     if seed:
@@ -364,6 +378,7 @@ def build_brief(session: ProjectSession, doc_type_key: str,
     dt = get_doc_type(doc_type_key)
     default_fmt = dt.format.as_dict()
     evidence = _gather_evidence(session)
+    _beat(session, "Analizando la evidencia recolectada", "Definiendo estructura y requisitos del documento")
     support_join = "\n\n".join(
         f"=== {n} ===\n{_clip(t, 3500)}" for n, t in (session.support_docs or [])
     )

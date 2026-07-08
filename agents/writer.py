@@ -10,6 +10,19 @@ from config import MAX_TOKENS_WRITER
 from models.schemas import DocumentBrief, ProjectSession
 
 
+def _beat(session: ProjectSession, label: str, detail: str = "") -> None:
+    """Latido de progreso best-effort durante la redacción (fase 2). La escritura
+    multipasada de un documento largo hace muchas llamadas LLM seguidas sin que el
+    pipeline emita progreso; sin este latido, el watchdog de 'sin actividad' podría
+    marcar como interrumpida una sesión que en realidad sigue redactando."""
+    try:
+        from db import repository
+        repository.update_progress(session.session_id, phase="fase2",
+                                   label=label, icon="✍️", status="running", detail=detail)
+    except Exception:
+        pass
+
+
 SYSTEM_PROMPT = """
 Eres un redactor profesional de élite absoluta y pensador de primer orden: polímata con dominio
 simultáneo en múltiples disciplinas técnicas, científicas, jurídicas y humanísticas. Tu historial
@@ -504,6 +517,8 @@ def _run_multipass(session: ProjectSession, corrections: list, api_key: str,
     written_summary: list[tuple[str, str]] = []
     section_texts: list[str] = []
     for idx, sec in enumerate(plan):
+        _beat(session, f"Redactando sección {idx + 1}/{len(plan)}",
+              str(sec.get("title", ""))[:80])
         sec_prompt = _build_section_prompt(brief, ctx, plan, idx, written_summary, corrections)
         try:
             sec_text, used = llm.complete_builder(

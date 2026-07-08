@@ -6,6 +6,7 @@ y desde aquí las puedes listar/recuperar para revisar o reanalizar.
 from __future__ import annotations
 
 import datetime
+import os
 from typing import Any, Optional
 
 from utils.supabase_client import get_client
@@ -14,19 +15,39 @@ from utils.supabase_client import get_client
 # el dyno se duerme) queda en status='running' para siempre: nada la reconcilia,
 # y la UI muestra un loader infinito. Se corrige de forma perezosa (best-effort)
 # la primera vez que se consulta esa sesión, en vez de requerir un watchdog aparte.
-_STALE_RUNNING_MINUTES = 20
+#
+# 20→30 min: el umbral DEBE ser mayor que el mayor hueco posible entre latidos de
+# una sesión que sigue viva. Una sola llamada LLM tiene hasta 600s de timeout con
+# varios reintentos, y algunas fases (análisis de investigación, redacción de una
+# sección larga) encadenan varias — con 20 min una sesión activa podía cruzar el
+# umbral y marcarse "interrumpida" por error. Ahora las fases largas emiten latidos
+# intermedios (researcher._beat / writer._beat) Y el umbral tiene margen.
+_STALE_RUNNING_MINUTES = int(os.getenv("STALE_RUNNING_MINUTES", "30"))
 
 
-def _last_heartbeat(row: dict) -> Optional[datetime.datetime]:
-    steps = row.get("progress_steps") or []
-    ts = steps[-1].get("ts") if steps else None
-    ts = ts or row.get("started_at") or row.get("created_at")
+def _parse_ts(ts) -> Optional[datetime.datetime]:
     if not ts:
         return None
     try:
         return datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+def _last_heartbeat(row: dict) -> Optional[datetime.datetime]:
+    # OJO: repository.update_progress ACTUALIZA cada paso EN SU SITIO por 'phase'
+    # (o lo añade), así que el último elemento del arreglo NO es necesariamente el
+    # más reciente. Durante las fases lentas de un ciclo posterior (investigación
+    # web + redacción), los pasos que se refrescan están en índices tempranos y
+    # steps[-1] (p. ej. un gate de un ciclo anterior) conserva un ts congelado.
+    # Tomar steps[-1] mataba por "inactividad" a sesiones que seguían trabajando.
+    # El latido real es el MÁXIMO ts entre TODOS los pasos.
+    steps = row.get("progress_steps") or []
+    heartbeats = [_parse_ts(s.get("ts")) for s in steps]
+    heartbeats = [h for h in heartbeats if h is not None]
+    if heartbeats:
+        return max(heartbeats)
+    return _parse_ts(row.get("started_at") or row.get("created_at"))
 
 
 def _reconcile_stale_running(row: dict) -> dict:
