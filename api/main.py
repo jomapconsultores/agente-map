@@ -483,9 +483,32 @@ def logo_png():
                         headers={"Cache-Control": "max-age=604800"})
 
 
+def _deployed_commit() -> str:
+    """SHA del commit desplegado, para verificar QUÉ código está corriendo en vivo
+    (antes /healthz solo daba una versión estática y no permitía confirmar deploys).
+    Coolify/Render exponen el commit como variable de entorno; se prueban los
+    nombres habituales y, si no, se lee git localmente como último recurso."""
+    for var in ("SOURCE_COMMIT", "GIT_COMMIT", "GIT_SHA", "COMMIT_SHA",
+                "RENDER_GIT_COMMIT", "COOLIFY_GIT_COMMIT", "COOLIFY_GIT_SHA"):
+        val = os.environ.get(var, "")
+        if val:
+            return val[:12]
+    try:
+        import subprocess
+        out = subprocess.run(["git", "rev-parse", "--short=12", "HEAD"],
+                             capture_output=True, text=True, timeout=3,
+                             cwd=os.path.dirname(os.path.dirname(__file__)))
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "service": "agente_map", "version": app.version}
+    return {"ok": True, "service": "agente_map", "version": app.version,
+            "commit": _deployed_commit()}
 
 
 # ── WebAuthn endpoints ───────────────────────────────────────────────────────
