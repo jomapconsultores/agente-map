@@ -337,6 +337,20 @@ def run_pipeline(
         owner_user_id=owner_user_id,
     )
 
+    # El usuario ENTREGÓ material (subió una propuesta, bases, TDR o una plantilla):
+    # el material fuente ya está en la mano. En ese caso NO se hace búsqueda web de
+    # financiamiento y los gates se ajustan a "analizar/mejorar el documento
+    # entregado" en vez de "verificar fuentes web con URL".
+    #   · Se excluye el modo "url" (Enlaces): ahí la fase de investigación DESCARGA los
+    #     enlaces que el usuario proporcionó — no debe omitirse aunque adjunte un doc.
+    #   · Un `seed` (oportunidad elegida en scouting) NO es material entregado por el
+    #     usuario: ahí sí se investiga la convocatoria.
+    doc_driven = (
+        (bool(support_docs) or bool((template_text or "").strip()))
+        and mode in ("file", "text")
+        and not seed_opportunity
+    )
+
     # Un pipeline que arranca (fresco o "Continuar") nunca debe quedar pre-pausado:
     # sin esto, una sesión pausada una vez se repausaba de inmediato para siempre.
     repository.clear_pause_requested(session_id)
@@ -411,7 +425,13 @@ def run_pipeline(
                     if doc_type.is_proposal:
                         analysis = researcher.run(session, api_key, seed=seed_opportunity)
                         session.analysis = analysis
-                        if not analysis.viable:
+                        # Un NO-GO solo detiene la búsqueda de oportunidades (modos
+                        # search/url/text sin documento): ahí no hay nada que entregar.
+                        # Pero si el usuario SUBIÓ un documento (una propuesta ya escrita),
+                        # su intención es que la ANALICEMOS y produzcamos el entregable
+                        # mejorado — cortar con "NO-GO" y no devolver nada sería justo lo
+                        # que el usuario reporta como "no funciona". Se continúa a redactar.
+                        if not analysis.viable and not doc_driven:
                             _log(session_id, "fase1", "Análisis: oportunidad no viable", "🚫", "done")
                             session.approved = False
                             session.inconclusive_reason = "Análisis de viabilidad: NO-GO."
@@ -496,14 +516,52 @@ def run_pipeline(
                 # ── GATE 1 — la investigación la audita OTRA IA ──────────────
                 _log(session_id, "gate1", f"Gate 1: auditando investigación{cycle_label}",
                      "🔎", "running", "Codestral verifica fuentes reales y cobertura de lineamientos")
+                # El foco del gate depende de la fuente de la investigación: si el
+                # usuario ENTREGÓ el documento, no hubo búsqueda web (por diseño) y exigir
+                # "fuentes con URL" haría fallar el gate SIEMPRE, marcando inconcluso un
+                # análisis correcto. En ese caso se audita la FIDELIDAD del análisis frente
+                # al documento entregado, no la presencia de URLs web.
+                if doc_driven:
+                    g1_focus = (
+                        "El usuario ENTREGÓ el documento fuente (una propuesta/bases ya escritas); "
+                        "NO se realizó búsqueda web y es correcto que no haya URLs externas. "
+                        "Verifica que el análisis refleje FIELMENTE el documento entregado, que "
+                        "identifique correctamente sus componentes (objetivo, metodología, "
+                        "presupuesto, beneficiarios, sostenibilidad, marco lógico) y que las "
+                        "recomendaciones para mejorarlo sean concretas. NO exijas fuentes web con "
+                        "URL ni penalices por su ausencia; sí marca como crítico cualquier dato "
+                        "que contradiga el documento o que haya sido inventado."
+                    )
+                else:
+                    g1_focus = (
+                        "Verifica que la investigación esté fundamentada en fuentes reales "
+                        "(con URL), sin datos inventados, y que cubra lineamientos y requisitos."
+                    )
                 g1 = phase_review.review(
                     ROLE_REVIEW_RESEARCH, phase="investigación",
                     brief=session.brief, content=_research_content(session),
-                    focus="Verifica que la investigación esté fundamentada en fuentes reales "
-                          "(con URL), sin datos inventados, y que cubra lineamientos y requisitos.",
+                    focus=g1_focus,
                 )
                 session.phase_reviews.append({"attempt": attempt, **g1})
-                if not g1["passed"]:
+                # RUTA DOCUMENTO ENTREGADO: Gate 1 audita la CALIDAD DE INVESTIGACIÓN
+                # WEB, que no aplica cuando el usuario ya entregó el material fuente. Aquí
+                # es ADVISORY: sus observaciones alimentan al redactor como correcciones,
+                # pero NO fuerzan reinicio (evita 10 ciclos inútiles) ni marcan el
+                # entregable como "inconcluso por investigación". El contenido igual lo
+                # filtran Gate 2 (redacción), Gate 3 (paquete) y el veredicto final 90/90.
+                if doc_driven and not g1["passed"]:
+                    pending_corrections = (g1.get("critical") or []) + (g1.get("issues") or [])
+                    _log(session_id, "gate1",
+                         f"Gate 1 (advisory, documento entregado){cycle_label}", "📝", "done",
+                         f"Puntaje: {g1.get('score', '—')}/100 · observaciones enviadas al redactor")
+                    _keep_quality_notes(session, "Gate 1 — análisis del documento", g1)
+                    research_approved = True
+                    session.research_approved = True
+                    try:
+                        repository.save_session(session)
+                    except Exception:
+                        pass
+                elif not g1["passed"]:
                     pending_corrections = (g1.get("critical") or []) + (g1.get("issues") or [])
                     if attempt < MAX_PIPELINE_RESTARTS:
                         _log(session_id, "gate1", f"Gate 1 no aprobado — reiniciando{cycle_label}",

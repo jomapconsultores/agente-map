@@ -293,8 +293,28 @@ def run(session: ProjectSession, api_key: str | None = None,
     Si `seed` (oportunidad elegida en el scouting) está presente, el análisis se
     centra en ESA convocatoria con sus requisitos reales (no re-busca otra)."""
     provider = config.ROLE_RESEARCH
-    evidence = _gather_evidence(session, seed=seed)
-    _beat(session, "Analizando la evidencia recolectada", "Evaluando viabilidad y financiador")
+
+    # ── DOCUMENTO ENTREGADO POR EL USUARIO → se analiza directamente ──────────
+    # Cuando el usuario SUBE documentos (una propuesta ya escrita, bases, TDR) el
+    # material fuente ya está en la mano. Lanzar la búsqueda web de financiamiento
+    # (opportunity_queries, 32 consultas × ~20 s) es: (a) OFF-TOPIC — busca
+    # convocatorias en vez de analizar lo que el usuario entregó; (b) LENTO —
+    # minutos por ciclo, hasta 10 ciclos; (c) el camino con historial de CRASH del
+    # proceso en Windows por anidamiento de ThreadPoolExecutors dentro del
+    # BackgroundTask. Para hunting de convocatorias existe el flujo "Buscar".
+    # Con un `seed` (oportunidad ya elegida en scouting) sí se investiga esa entidad.
+    # Se excluye el modo "url": ahí _gather_evidence DESCARGA los enlaces del usuario.
+    doc_driven = (
+        (bool(session.support_docs) or bool((session.template_text or "").strip()))
+        and session.input_mode in ("file", "text")
+    )
+    if seed or not doc_driven:
+        evidence = _gather_evidence(session, seed=seed)
+        _beat(session, "Analizando la evidencia recolectada", "Evaluando viabilidad y financiador")
+    else:
+        evidence = ""
+        _beat(session, "Analizando el documento entregado",
+              "Extrayendo componentes y evaluando la propuesta subida")
 
     seed_block = ""
     if seed:
@@ -315,18 +335,38 @@ def run(session: ProjectSession, api_key: str | None = None,
 
     # Reutiliza el esquema JSON completo del analista (modo "analizar documento"),
     # entregándole la evidencia ya recolectada como material fuente.
+    if doc_driven and not evidence:
+        # Analiza el DOCUMENTO entregado con todos sus componentes; no hubo búsqueda web.
+        closing_rule = (
+            "REGLA: El usuario ENTREGÓ el/los documento(s) de arriba (una propuesta ya "
+            "escrita, bases o TDR). Analízalo(s) EXHAUSTIVAMENTE con TODOS sus componentes: "
+            "objetivo, justificación, metodología, beneficiarios, presupuesto, cronograma, "
+            "marco lógico, sostenibilidad, alineación normativa, fortalezas, riesgos y "
+            "factores críticos de éxito. NO inventes datos: extrae los REALES del documento. "
+            "Si el documento NO especifica financiador/deadline/monto, usa 'A determinar' SIN "
+            "penalizar viability_score por ello (la ausencia de una convocatoria concreta no "
+            "resta viabilidad al proyecto en sí; evalúa la calidad y coherencia de la propuesta). "
+            "En 'recommendations' da instrucciones concretas para mejorar y completar el "
+            "documento hasta dejarlo listo para presentar.\n"
+            "Al identificar la organización ejecutora/proponente, usa los datos REALES del "
+            "documento y de la sección ORGANIZACIONES E INDIVIDUOS DISPONIBLES (si existe arriba)."
+        )
+    else:
+        closing_rule = (
+            "REGLA: NO inventes datos. Usa SOLO la evidencia de arriba; cada dato "
+            "concreto (financiador, deadline, monto, elegibilidad, criterios) debe estar "
+            "respaldado por una URL real presente en la evidencia. Si un dato no aparece, "
+            "márcalo como 'no verificado' y baja viability_score en consecuencia.\n"
+            "Al identificar la organización ejecutora/proponente, usa los datos REALES de "
+            "la sección ORGANIZACIONES E INDIVIDUOS DISPONIBLES (si existe arriba)."
+        )
     document = (
         f"TEMA / SOLICITUD DEL USUARIO:\n{session.user_input}\n"
         f"{seed_block}\n"
         f"{evidence}"
         f"{_support_block(session)}"
         f"{empresas_block}\n\n"
-        "REGLA: NO inventes datos. Usa SOLO la evidencia de arriba; cada dato "
-        "concreto (financiador, deadline, monto, elegibilidad, criterios) debe estar "
-        "respaldado por una URL real presente en la evidencia. Si un dato no aparece, "
-        "márcalo como 'no verificado' y baja viability_score en consecuencia.\n"
-        "Al identificar la organización ejecutora/proponente, usa los datos REALES de "
-        "la sección ORGANIZACIONES E INDIVIDUOS DISPONIBLES (si existe arriba)."
+        + closing_rule
     )
     # RESEARCHER_SYSTEM_PROMPT es el correcto aquí: no menciona herramientas de tool-use
     # (deep_search/fetch_page/web_search) que confunden a Mistral/Codestral/DeepSeek.
@@ -384,7 +424,17 @@ def build_brief(session: ProjectSession, doc_type_key: str,
     # off-topic — p. ej. una cotización de software se volvía un "mapeo de
     # convocatorias de financiamiento". Para estos tipos se OMITE la búsqueda y se
     # redacta directamente desde el pedido: más rápido y on-topic.
-    self_contained = dt.key in {"generico", "legal_tecnico"}
+    # Se OMITE la búsqueda web de financiamiento cuando: (a) el tipo es
+    # autocontenido por naturaleza (cotización/informe/carta/oficio/documento
+    # personalizado), o (b) el usuario ENTREGÓ documentos (revisión por pares de un
+    # manuscrito, análisis de un TDR/bases subido): el material fuente ya está en la
+    # mano y opportunity_queries (búsqueda de convocatorias) sería off-topic, lento y
+    # con riesgo de crash por threads en Windows.
+    doc_driven = (
+        (bool(session.support_docs) or bool((session.template_text or "").strip()))
+        and session.input_mode in ("file", "text")
+    )
+    self_contained = dt.key in {"generico", "legal_tecnico"} or doc_driven
     if self_contained:
         evidence = ""
     else:

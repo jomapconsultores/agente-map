@@ -351,6 +351,23 @@ def _run_agent_loop(client: anthropic.Anthropic, prompt: str) -> str:
     raise RuntimeError("Claude completó el loop de herramientas sin devolver texto final (respuesta vacía)")
 
 
+def _num(value, default: float = 0.0) -> float:
+    """Coerción numérica tolerante: la IA a veces devuelve '70%', '24 meses', ''
+    o null donde se espera un número. Extrae el primer número real; si no hay,
+    usa el default — nunca lanza ValueError/TypeError (que antes tumbaban el
+    análisis en result_from_data)."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    import re as _re
+    m = _re.search(r"-?\d+(?:[.,]\d+)?", str(value or ""))
+    if not m:
+        return float(default)
+    try:
+        return float(m.group(0).replace(",", "."))
+    except ValueError:
+        return float(default)
+
+
 def _parse_result(raw: str) -> dict:
     from utils.json_utils import robust_json_loads
     try:
@@ -400,15 +417,22 @@ def run(session: ProjectSession, api_key: str) -> AnalysisResult:
 def result_from_data(data: dict, raw: str = "") -> AnalysisResult:
     """Convierte el JSON de análisis (lo produzca Claude o cualquier otra IA) en
     un AnalysisResult tipado. Reutilizado por agents/researcher.py."""
+    # `funder` puede faltar por completo o venir sin `name` cuando la IA analiza un
+    # documento AUTOCONTENIDO (una propuesta ya escrita, sin búsqueda web de
+    # financiador): antes `data["funder"]["name"]` lanzaba KeyError y tumbaba
+    # researcher.run(), quemando ciclos del pipeline hasta el timeout. Se accede a
+    # todo con .get() y valores por defecto para que el análisis nunca se caiga por
+    # la ausencia de un financiador concreto.
+    fdata = data.get("funder") or {}
     funder = FunderInfo(
-        name=data["funder"]["name"],
-        type=data["funder"].get("type", "internacional"),
-        url=data["funder"].get("url", ""),
-        deadline=data["funder"].get("deadline", "A determinar"),
-        amount_range=data["funder"].get("amount_range", ""),
-        language=data["funder"].get("language", "es"),
-        sector=data["funder"].get("sector", ""),
-        country_focus=data["funder"].get("country_focus", ""),
+        name=fdata.get("name") or "A determinar",
+        type=fdata.get("type", "internacional"),
+        url=fdata.get("url", ""),
+        deadline=fdata.get("deadline", "A determinar"),
+        amount_range=fdata.get("amount_range", ""),
+        language=fdata.get("language", "es"),
+        sector=fdata.get("sector", ""),
+        country_focus=fdata.get("country_focus", ""),
     )
 
     ea_data = data.get("ecuador_alignment", {})
@@ -420,19 +444,19 @@ def result_from_data(data: dict, raw: str = "") -> AnalysisResult:
         national_priority=ea_data.get("national_priority", False),
     )
 
-    score = float(data.get("viability_score", 0))
+    score = _num(data.get("viability_score"), 0)
     viable = score >= VIABILITY_THRESHOLD and data.get("go_no_go") != "NO-GO"
 
     return AnalysisResult(
         viable=viable,
         go_no_go=data.get("go_no_go", "NO-GO"),
         viability_score=score,
-        winning_probability=float(data.get("winning_probability", 0)),
+        winning_probability=_num(data.get("winning_probability"), 0),
         project_title=data.get("project_title", "Proyecto sin título"),
         funder=funder,
         sector=data.get("sector", ""),
         total_amount=data.get("total_amount", ""),
-        duration_months=int(data.get("duration_months", 12)),
+        duration_months=int(_num(data.get("duration_months"), 12)),
         beneficiaries=data.get("beneficiaries", ""),
         language=data.get("language", "es"),
         ecuador_alignment=ecuador_alignment,
