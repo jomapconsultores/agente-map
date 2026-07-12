@@ -140,14 +140,14 @@ def _mark_running(session_id: str, owner_user_id: Optional[str] = None):
     if not repository.is_enabled():
         return
     try:
-        from utils.supabase_client import get_client
-        sb = get_client(service_role=True)
+        from utils.supabase_client import get_client, run_with_retry
         row = {"session_id": session_id, "status": "running",
                "started_at": "now()", "user_input": "(initializing)",
                "input_mode": "text", "doc_type_key": "propuesta"}
         if owner_user_id:
             row["owner_user_id"] = owner_user_id
-        sb.table("sessions").upsert(row, on_conflict="session_id").execute()
+        run_with_retry(lambda: get_client(service_role=True).table("sessions")
+                       .upsert(row, on_conflict="session_id").execute())
     except Exception:
         pass  # no bloquea el pipeline
 
@@ -156,12 +156,11 @@ def _mark_failed(session_id: str, error: str):
     if not repository.is_enabled():
         return
     try:
-        from utils.supabase_client import get_client
-        sb = get_client(service_role=True)
-        sb.table("sessions").update(
+        from utils.supabase_client import get_client, run_with_retry
+        run_with_retry(lambda: get_client(service_role=True).table("sessions").update(
             {"status": "failed", "error_message": error[:2000],
              "completed_at": "now()"}
-        ).eq("session_id", session_id).execute()
+        ).eq("session_id", session_id).execute())
     except Exception:
         pass
 
@@ -170,12 +169,11 @@ def _mark_completed(session_id: str, approved: bool):
     if not repository.is_enabled():
         return
     try:
-        from utils.supabase_client import get_client
-        sb = get_client(service_role=True)
-        sb.table("sessions").update(
+        from utils.supabase_client import get_client, run_with_retry
+        run_with_retry(lambda: get_client(service_role=True).table("sessions").update(
             {"status": "approved" if approved else "failed",
              "completed_at": "now()"}
-        ).eq("session_id", session_id).execute()
+        ).eq("session_id", session_id).execute())
     except Exception:
         pass
 

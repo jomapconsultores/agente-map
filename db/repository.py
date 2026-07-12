@@ -19,7 +19,7 @@ from models.schemas import (
     AnalysisResult, DocumentBrief, EcuadorAlignment, FinancialPackage,
     FunderInfo, ProjectSession,
 )
-from utils.supabase_client import get_client
+from utils.supabase_client import get_client, run_with_retry
 
 
 class SupabaseSaveError(RuntimeError):
@@ -101,24 +101,30 @@ def update_progress(session_id: str, phase: str, label: str, icon: str = "⚙",
         return
     try:
         import datetime
-        from utils.supabase_client import get_client
-        sb = get_client(service_role=True)
-        # Recuperar pasos actuales
-        row = sb.table("sessions").select("progress_steps").eq(
-            "session_id", session_id).limit(1).execute()
-        steps: list = (row.data[0].get("progress_steps") or []) if row.data else []
-        # Actualizar paso existente si ya existe la misma fase, o añadir nuevo
-        ts = datetime.datetime.utcnow().isoformat() + "Z"
-        new_step = {"phase": phase, "label": label, "icon": icon,
-                    "status": status, "detail": detail, "ts": ts}
-        idx = next((i for i, s in enumerate(steps) if s.get("phase") == phase), -1)
-        if idx >= 0:
-            steps[idx] = new_step
-        else:
-            steps.append(new_step)
-        sb.table("sessions").update(
-            {"current_phase": f"{icon} {label}", "progress_steps": steps}
-        ).eq("session_id", session_id).execute()
+
+        def _do():
+            sb = get_client(service_role=True)
+            # Recuperar pasos actuales
+            row = sb.table("sessions").select("progress_steps").eq(
+                "session_id", session_id).limit(1).execute()
+            steps: list = (row.data[0].get("progress_steps") or []) if row.data else []
+            # Actualizar paso existente si ya existe la misma fase, o añadir nuevo
+            ts = datetime.datetime.utcnow().isoformat() + "Z"
+            new_step = {"phase": phase, "label": label, "icon": icon,
+                        "status": status, "detail": detail, "ts": ts}
+            idx = next((i for i, s in enumerate(steps) if s.get("phase") == phase), -1)
+            if idx >= 0:
+                steps[idx] = new_step
+            else:
+                steps.append(new_step)
+            sb.table("sessions").update(
+                {"current_phase": f"{icon} {label}", "progress_steps": steps}
+            ).eq("session_id", session_id).execute()
+
+        # Reintenta ante desconexiones transitorias de Supabase: el latido es lo que
+        # mantiene viva a la sesión ante el watchdog; perderlo por un corte de red
+        # es justo lo que causaba los falsos "sin actividad".
+        run_with_retry(_do)
     except Exception:
         pass  # el progreso no debe tumbar el pipeline
 

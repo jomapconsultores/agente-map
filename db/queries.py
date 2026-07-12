@@ -9,7 +9,7 @@ import datetime
 import os
 from typing import Any, Optional
 
-from utils.supabase_client import get_client
+from utils.supabase_client import get_client, run_with_retry
 
 # Sin esto, una sesión cuyo proceso muere a mitad del pipeline (crash, redeploy,
 # el dyno se duerme) queda en status='running' para siempre: nada la reconcilia,
@@ -62,8 +62,7 @@ def _reconcile_stale_running(row: dict) -> dict:
     if (now - hb).total_seconds() < _STALE_RUNNING_MINUTES * 60:
         return row
     try:
-        sb = get_client(service_role=True)
-        sb.table("sessions").update({
+        run_with_retry(lambda: get_client(service_role=True).table("sessions").update({
             "status": "failed",
             "error_message": (
                 f"Proceso interrumpido — sin actividad por más de "
@@ -71,7 +70,7 @@ def _reconcile_stale_running(row: dict) -> dict:
                 "Usa Continuar para reintentar."
             ),
             "completed_at": "now()",
-        }).eq("session_id", row["session_id"]).execute()
+        }).eq("session_id", row["session_id"]).execute())
         row["status"] = "failed"
     except Exception:
         pass  # reconciliación es best-effort, nunca debe romper la lectura
@@ -90,16 +89,10 @@ def reconcile_orphaned_running(limit: int = 500) -> int:
     segura aunque algún día se escale a más de un worker. Devuelve cuántas reconcilió.
     """
     try:
-        sb = get_client(service_role=True)
-        rows = (
-            sb.table("sessions")
-            .select("session_id, status, progress_steps, started_at, created_at")
-            .eq("status", "running")
-            .limit(limit)
-            .execute()
-            .data
-            or []
-        )
+        rows = run_with_retry(lambda: get_client(service_role=True)
+                              .table("sessions")
+                              .select("session_id, status, progress_steps, started_at, created_at")
+                              .eq("status", "running").limit(limit).execute()).data or []
     except Exception:
         return 0
     n = 0
@@ -120,22 +113,28 @@ def list_sessions(limit: int = 20, *, approved_only: bool = False,
 
     Si `owner_user_id` se pasa, filtra solo las de ese dueño (vista por usuario).
     Si es None, devuelve todas (vista admin / clave maestra)."""
-    sb = get_client(service_role=True)
-    q = (
-        sb.table("sessions")
-        .select(
-            "id, session_id, doc_type_key, approved, current_cycle, "
-            "status, input_mode, user_input, completed_at, error_message, "
-            "created_at, started_at, progress_steps, owner_user_id, brief, analysis"
+    def _fetch():
+        # Reconstruye el query DENTRO del retry: tras un reset, get_client devuelve
+        # un cliente nuevo; reutilizar un query armado con el cliente muerto volvería
+        # a fallar sobre la misma conexión caída.
+        sb = get_client(service_role=True)
+        q = (
+            sb.table("sessions")
+            .select(
+                "id, session_id, doc_type_key, approved, current_cycle, "
+                "status, input_mode, user_input, completed_at, error_message, "
+                "created_at, started_at, progress_steps, owner_user_id, brief, analysis"
+            )
+            .order("created_at", desc=True)
+            .limit(limit)
         )
-        .order("created_at", desc=True)
-        .limit(limit)
-    )
-    if approved_only:
-        q = q.eq("approved", True)
-    if owner_user_id is not None:
-        q = q.eq("owner_user_id", owner_user_id)
-    rows = q.execute().data or []
+        if approved_only:
+            q = q.eq("approved", True)
+        if owner_user_id is not None:
+            q = q.eq("owner_user_id", owner_user_id)
+        return q.execute()
+
+    rows = run_with_retry(_fetch).data or []
 
     # Aplana los campos más útiles del JSON anidado para facilitar el listado.
     for r in rows:
@@ -157,33 +156,21 @@ def _auto_title(row: dict, is_scouting: bool = False) -> str:
 
 def get_session(session_id: str) -> Optional[dict[str, Any]]:
     """Recupera una sesión completa (con borradores y revisiones)."""
-    sb = get_client(service_role=True)
-    sess = (
-        sb.table("sessions").select("*").eq("session_id", session_id).limit(1).execute()
-    )
+    sess = run_with_retry(lambda: get_client(service_role=True)
+                          .table("sessions").select("*")
+                          .eq("session_id", session_id).limit(1).execute())
     if not sess.data:
         return None
     row = sess.data[0]
     row_uuid = row["id"]
 
-    versions = (
-        sb.table("proposal_versions")
-        .select("cycle, content, char_count, created_at")
-        .eq("session_id", row_uuid)
-        .order("cycle")
-        .execute()
-        .data
-        or []
-    )
-    reviews = (
-        sb.table("reviews")
-        .select("*")
-        .eq("session_id", row_uuid)
-        .order("cycle")
-        .execute()
-        .data
-        or []
-    )
+    versions = run_with_retry(lambda: get_client(service_role=True)
+                              .table("proposal_versions")
+                              .select("cycle, content, char_count, created_at")
+                              .eq("session_id", row_uuid).order("cycle").execute()).data or []
+    reviews = run_with_retry(lambda: get_client(service_role=True)
+                             .table("reviews").select("*")
+                             .eq("session_id", row_uuid).order("cycle").execute()).data or []
     row["proposal_versions"] = versions
     row["reviews"] = reviews
     return _reconcile_stale_running(row)
