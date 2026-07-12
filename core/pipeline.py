@@ -27,6 +27,7 @@ flujo interactivo propio.
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from typing import Optional
@@ -67,6 +68,45 @@ def _log(session_id: str, phase: str, label: str, icon: str = "⚙",
     """Registra el avance del pipeline en la BD para mostrarlo en la UI."""
     repository.update_progress(session_id, phase=phase, label=label,
                                 icon=icon, status=status, detail=detail)
+
+
+def _phase_heartbeater(session_id: str, phase: str, label: str, icon: str = "⚙"):
+    """Mantiene fresco el latido de una fase que hace UNA sola llamada LLM larga
+    (intake, gates, financial, veredicto) y por eso no emite progreso propio como
+    sí lo hacen researcher._beat/writer._beat.
+
+    Refresca progress_steps[phase].ts cada 60 s en un hilo daemon mientras la fase
+    está en vuelo. Sin esto, una llamada legítimamente lenta (varios minutos, con
+    reintentos) cruzaba el watchdog de 'sin actividad' (db.queries, 30 min) y la
+    sesión se marcaba 'interrumpida' aunque el proceso siguiera trabajando.
+
+    update_progress(phase=X) actualiza ESE paso en su sitio (repository.py) y
+    _last_heartbeat = max(ts) de todos los pasos (db.queries), así que basta con
+    refrescar el paso de la fase en curso. No hay carrera: solo corre una fase a la
+    vez y el cuerpo del pipeline no reescribe ese paso durante la llamada.
+
+    Devuelve (stop_event, thread); llama stop.set() en un finally para cortarlo.
+    """
+    stop = threading.Event()
+
+    def _loop():
+        while not stop.wait(60):
+            try:
+                repository.update_progress(session_id, phase=phase, label=label,
+                                           icon=icon, status="running")
+            except Exception:
+                pass  # el latido nunca debe tumbar el pipeline
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+    return stop, t
+
+
+def _wallclock_exceeded(start: float) -> bool:
+    """True si el pipeline ya superó el techo de tiempo de pared. Se evalúa también
+    DENTRO del ciclo (antes de las fases caras) — no solo al tope del for — para que
+    una sola fase lenta no cruce el watchdog de 'sin actividad' sin ser cortada."""
+    return (time.monotonic() - start) > config.MAX_PIPELINE_WALLCLOCK_SEC
 
 
 def _keep_quality_notes(session: "ProjectSession", phase: str, gate_result: dict) -> None:
@@ -358,11 +398,18 @@ def run_pipeline(
     # ── Reanudación tras pausa: reutiliza investigación/redacción ya aprobadas ──
     resumed_state = None
     resume_cycle_offset = 0
+    # Checkpoints de grano fino consumidos SOLO en el primer paso reanudado (luego
+    # el pipeline se comporta como siempre). Evitan repetir la redacción multipasada
+    # y los gates ya superados si la sesión murió DESPUÉS de aprobarlos.
+    resume_gate2 = False
+    resume_gate3 = False
     try:
         resumed_state = repository.load_resumable_state(session_id)
     except Exception:
         resumed_state = None
     if resumed_state:
+        resume_gate2 = bool(resumed_state.get("gate2_passed")) and bool(resumed_state.get("proposal_versions"))
+        resume_gate3 = resume_gate2 and bool(resumed_state.get("gate3_passed"))
         session.analysis = resumed_state["analysis"]
         session.brief = resumed_state["brief"]
         session.financial = resumed_state["financial"]
@@ -385,7 +432,11 @@ def run_pipeline(
 
         # ── FASE 0.5 — INTAKE (una sola vez; los docs de entrada no cambian) ──
         _log(session_id, "fase0_5", "Analizando documentos de entrada", "📄", "running")
-        session.intake_data = intake.analyze(session)
+        _stop, _ = _phase_heartbeater(session_id, "fase0_5", "Analizando documentos de entrada", "📄")
+        try:
+            session.intake_data = intake.analyze(session)
+        finally:
+            _stop.set()
         _log(session_id, "fase0_5", "Documentos analizados", "📄", "done")
 
         # Contexto organizacional (Empresas/) — cargado una sola vez
@@ -537,11 +588,16 @@ def run_pipeline(
                         "Verifica que la investigación esté fundamentada en fuentes reales "
                         "(con URL), sin datos inventados, y que cubra lineamientos y requisitos."
                     )
-                g1 = phase_review.review(
-                    ROLE_REVIEW_RESEARCH, phase="investigación",
-                    brief=session.brief, content=_research_content(session),
-                    focus=g1_focus,
-                )
+                _stop, _ = _phase_heartbeater(session_id, "gate1",
+                                              f"Gate 1: auditando investigación{cycle_label}", "🔎")
+                try:
+                    g1 = phase_review.review(
+                        ROLE_REVIEW_RESEARCH, phase="investigación",
+                        brief=session.brief, content=_research_content(session),
+                        focus=g1_focus,
+                    )
+                finally:
+                    _stop.set()
                 session.phase_reviews.append({"attempt": attempt, **g1})
                 # RUTA DOCUMENTO ENTREGADO: Gate 1 audita la CALIDAD DE INVESTIGACIÓN
                 # WEB, que no aplica cuando el usuario ya entregó el material fuente. Aquí
@@ -605,78 +661,147 @@ def run_pipeline(
             if _pause_if_requested(session_id, session, research_approved):
                 return session
 
-            # ── FASE 2 — REDACCIÓN (IA redactora) ────────────────────────────
-            _log(session_id, "fase2", f"Redactando documento{cycle_label}",
-                 "✍️", "running", "Codestral estructura y redacta la propuesta completa")
-            proposal = writer.run(session, pending_corrections, api_key, provider=ROLE_WRITER)
-            pending_corrections = []  # ya se aplicaron en esta redacción
-            session.proposal_versions.append(proposal)
-            session.final_proposal = proposal
-            _log(session_id, "fase2", f"Redacción completada{cycle_label}", "✍️", "done",
-                 f"{len(proposal):,} caracteres generados")
+            if _wallclock_exceeded(pipeline_start):
+                _log(session_id, "timeout",
+                     f"Techo de tiempo alcanzado — se entrega la mejor versión{cycle_label}",
+                     "⏱️", "warning", f"Límite: {config.MAX_PIPELINE_WALLCLOCK_SEC/60:.0f} min")
+                break
 
-            # ── GATE 2 — la redacción la audita OTRA IA ──────────────────────
-            _log(session_id, "gate2", f"Gate 2: auditando redacción{cycle_label}",
-                 "🔎", "running", "Mistral verifica secciones, formato y rigor")
-            g2 = phase_review.review(
-                ROLE_REVIEW_WRITER, phase="redacción",
-                brief=session.brief, content=proposal,
-                focus="Verifica secciones completas, cumplimiento de formato y lineamientos, "
-                      "rigor y ausencia de relleno o datos inventados.",
-            )
-            session.phase_reviews.append({"attempt": attempt, **g2})
-            if not g2["passed"]:
-                pending_corrections = (g2.get("critical") or []) + (g2.get("issues") or [])
-                _log(session_id, "gate2", f"Gate 2 no aprobado — reiniciando{cycle_label}",
-                     "🔄", "warning",
-                     f"Puntaje: {g2.get('score', '—')}/100 · " +
-                     "; ".join(pending_corrections[:3] or [g2.get("recommendation", "")])[:200])
-                continue  # VUELVE AL INICIO
-            _log(session_id, "gate2", f"Gate 2 aprobado{cycle_label}", "✅", "done",
-                 f"Puntaje: {g2.get('score', '—')}/100")
-            _keep_quality_notes(session, "Gate 2 — redacción", g2)
+            if resume_gate2:
+                # Reanudación: la redacción ya había pasado Gate 2 → se reutiliza sin
+                # repetir la fase más cara. Solo aplica al primer paso reanudado.
+                resume_gate2 = False
+                proposal = session.proposal_versions[-1]
+                session.final_proposal = proposal
+                _log(session_id, "gate2",
+                     f"Redacción y Gate 2 ya aprobados — se reutiliza{cycle_label}", "✅", "done",
+                     "Checkpoint reanudado: no se repite la redacción")
+            else:
+                # Empieza una redacción nueva: el borrador aún no está gateado.
+                session.gate2_passed = False
+                session.gate3_passed = False
 
-            if _pause_if_requested(session_id, session, research_approved):
-                return session
+                # ── FASE 2 — REDACCIÓN (IA redactora) ────────────────────────────
+                _log(session_id, "fase2", f"Redactando documento{cycle_label}",
+                     "✍️", "running", "Codestral estructura y redacta la propuesta completa")
+                proposal = writer.run(session, pending_corrections, api_key, provider=ROLE_WRITER)
+                pending_corrections = []  # ya se aplicaron en esta redacción
+                session.proposal_versions.append(proposal)
+                session.final_proposal = proposal
+                _log(session_id, "fase2", f"Redacción completada{cycle_label}", "✍️", "done",
+                     f"{len(proposal):,} caracteres generados")
 
-            # ── FASE 3 — ESTRUCTURACIÓN FINANCIERA (IA financiera) ───────────
-            if session.brief and session.brief.needs_budget_excel:
-                _log(session_id, "fase3", f"Estructurando presupuesto{cycle_label}",
-                     "💰", "running", "Codestral genera la estructura financiera")
+                # ── GATE 2 — la redacción la audita OTRA IA ──────────────────────
+                _log(session_id, "gate2", f"Gate 2: auditando redacción{cycle_label}",
+                     "🔎", "running", "Mistral verifica secciones, formato y rigor")
+                _stop, _ = _phase_heartbeater(session_id, "gate2",
+                                              f"Gate 2: auditando redacción{cycle_label}", "🔎")
                 try:
-                    session.financial = financial.run(
-                        session, proposal, api_key, provider=ROLE_FINANCIAL)
-                    _log(session_id, "fase3", f"Presupuesto completado{cycle_label}",
-                         "💰", "done")
+                    g2 = phase_review.review(
+                        ROLE_REVIEW_WRITER, phase="redacción",
+                        brief=session.brief, content=proposal,
+                        focus="Verifica secciones completas, cumplimiento de formato y lineamientos, "
+                              "rigor y ausencia de relleno o datos inventados.",
+                    )
+                finally:
+                    _stop.set()
+                session.phase_reviews.append({"attempt": attempt, **g2})
+                if not g2["passed"]:
+                    pending_corrections = (g2.get("critical") or []) + (g2.get("issues") or [])
+                    _log(session_id, "gate2", f"Gate 2 no aprobado — reiniciando{cycle_label}",
+                         "🔄", "warning",
+                         f"Puntaje: {g2.get('score', '—')}/100 · " +
+                         "; ".join(pending_corrections[:3] or [g2.get("recommendation", "")])[:200])
+                    continue  # VUELVE AL INICIO
+                _log(session_id, "gate2", f"Gate 2 aprobado{cycle_label}", "✅", "done",
+                     f"Puntaje: {g2.get('score', '—')}/100")
+                _keep_quality_notes(session, "Gate 2 — redacción", g2)
+                # Checkpoint: si la sesión muere ahora, al reanudar se salta la redacción.
+                session.gate2_passed = True
+                try:
+                    repository.save_session(session)
                 except Exception:
-                    session.financial = None
-                    _log(session_id, "fase3", "Presupuesto omitido (error no crítico)",
-                         "💰", "warning")
-
-            # ── GATE 3 — DeepSeek revisa el paquete completo ─────────────────
-            _log(session_id, "gate3", f"Gate 3: revisión del paquete completo{cycle_label}",
-                 "🔎", "running", "DeepSeek audita propuesta + presupuesto + requisitos")
-            g3 = phase_review.review_package(
-                brief=session.brief,
-                proposal=proposal,
-                financial=session.financial,
-                intake_data=session.intake_data,
-                empresas_context=empresas_context,
-            )
-            session.phase_reviews.append({"attempt": attempt, **g3})
-            if not g3["passed"]:
-                pending_corrections = (g3.get("critical") or []) + (g3.get("issues") or [])
-                _log(session_id, "gate3", f"Gate 3 no aprobado — reiniciando{cycle_label}",
-                     "🔄", "warning",
-                     f"Puntaje: {g3.get('score', '—')}/100 · " +
-                     "; ".join(pending_corrections[:3] or [g3.get("recommendation", "")])[:200])
-                continue  # VUELVE AL INICIO: reinvestiga y reescribe
-            _log(session_id, "gate3", f"Gate 3 aprobado{cycle_label}", "✅", "done",
-                 f"Puntaje: {g3.get('score', '—')}/100")
-            _keep_quality_notes(session, "Gate 3 — paquete completo", g3)
+                    pass
 
             if _pause_if_requested(session_id, session, research_approved):
                 return session
+
+            if _wallclock_exceeded(pipeline_start):
+                _log(session_id, "timeout",
+                     f"Techo de tiempo alcanzado — se entrega la mejor versión{cycle_label}",
+                     "⏱️", "warning", f"Límite: {config.MAX_PIPELINE_WALLCLOCK_SEC/60:.0f} min")
+                break
+
+            if resume_gate3:
+                # Reanudación: el paquete ya había pasado Gate 3 → se salta financiero
+                # y Gate 3 (el financiero ya viene rehidratado desde el checkpoint).
+                resume_gate3 = False
+                _log(session_id, "gate3",
+                     f"Presupuesto y Gate 3 ya aprobados — se reutiliza{cycle_label}", "✅", "done",
+                     "Checkpoint reanudado: no se repite el paquete")
+            else:
+                # ── FASE 3 — ESTRUCTURACIÓN FINANCIERA (IA financiera) ───────────
+                if session.brief and session.brief.needs_budget_excel:
+                    _log(session_id, "fase3", f"Estructurando presupuesto{cycle_label}",
+                         "💰", "running", "Codestral genera la estructura financiera")
+                    _stop, _ = _phase_heartbeater(session_id, "fase3",
+                                                  f"Estructurando presupuesto{cycle_label}", "💰")
+                    try:
+                        session.financial = financial.run(
+                            session, proposal, api_key, provider=ROLE_FINANCIAL)
+                        _log(session_id, "fase3", f"Presupuesto completado{cycle_label}",
+                             "💰", "done")
+                    except Exception:
+                        session.financial = None
+                        _log(session_id, "fase3", "Presupuesto omitido (error no crítico)",
+                             "💰", "warning")
+                    finally:
+                        _stop.set()
+
+                # ── GATE 3 — DeepSeek revisa el paquete completo ─────────────────
+                _log(session_id, "gate3", f"Gate 3: revisión del paquete completo{cycle_label}",
+                     "🔎", "running", "DeepSeek audita propuesta + presupuesto + requisitos")
+                _stop, _ = _phase_heartbeater(session_id, "gate3",
+                                              f"Gate 3: revisión del paquete completo{cycle_label}", "🔎")
+                try:
+                    g3 = phase_review.review_package(
+                        brief=session.brief,
+                        proposal=proposal,
+                        financial=session.financial,
+                        intake_data=session.intake_data,
+                        empresas_context=empresas_context,
+                    )
+                finally:
+                    _stop.set()
+                session.phase_reviews.append({"attempt": attempt, **g3})
+                if not g3["passed"]:
+                    pending_corrections = (g3.get("critical") or []) + (g3.get("issues") or [])
+                    # El borrador va a reescribirse → invalida el checkpoint de Gate 2.
+                    session.gate2_passed = False
+                    session.gate3_passed = False
+                    _log(session_id, "gate3", f"Gate 3 no aprobado — reiniciando{cycle_label}",
+                         "🔄", "warning",
+                         f"Puntaje: {g3.get('score', '—')}/100 · " +
+                         "; ".join(pending_corrections[:3] or [g3.get("recommendation", "")])[:200])
+                    continue  # VUELVE AL INICIO: reinvestiga y reescribe
+                _log(session_id, "gate3", f"Gate 3 aprobado{cycle_label}", "✅", "done",
+                     f"Puntaje: {g3.get('score', '—')}/100")
+                _keep_quality_notes(session, "Gate 3 — paquete completo", g3)
+                # Checkpoint: si la sesión muere ahora, al reanudar se salta directo a Fase 4.
+                session.gate3_passed = True
+                try:
+                    repository.save_session(session)
+                except Exception:
+                    pass
+
+            if _pause_if_requested(session_id, session, research_approved):
+                return session
+
+            if _wallclock_exceeded(pipeline_start):
+                _log(session_id, "timeout",
+                     f"Techo de tiempo alcanzado — se entrega la mejor versión{cycle_label}",
+                     "⏱️", "warning", f"Límite: {config.MAX_PIPELINE_WALLCLOCK_SEC/60:.0f} min")
+                break
 
             # ── FASE 4 — VEREDICTO FINAL (Claude, o consenso de 2 revisores) ──
             dual = bool(session.brief and session.brief.doc_type_key in config.SECOND_OPINION_DOC_TYPES)
@@ -684,8 +809,12 @@ def run_pipeline(
                  "⚖️", "running",
                  "Consenso de 2 revisores independientes (máxima exigencia)" if dual
                  else "Claude evalúa con criterios de máxima exigencia")
-            review = reviewer.run_dual(session, proposal, api_key) if dual \
-                else reviewer.run(session, proposal, api_key)
+            _stop, _ = _phase_heartbeater(session_id, "fase4", f"Veredicto final{cycle_label}", "⚖️")
+            try:
+                review = reviewer.run_dual(session, proposal, api_key) if dual \
+                    else reviewer.run(session, proposal, api_key)
+            finally:
+                _stop.set()
             session.review_results.append(review)
 
             if review.overall_score > best["score"]:
@@ -698,6 +827,10 @@ def run_pipeline(
                 approved = True
                 break
             pending_corrections = list(getattr(review, "corrections", None) or [])
+            # El veredicto rechazó → el borrador se reescribe: invalida los checkpoints
+            # de Gate 2/3 para que un resume no reutilice un borrador ya descartado.
+            session.gate2_passed = False
+            session.gate3_passed = False
             _log(session_id, "fase4", f"No aprobado — reiniciando{cycle_label}",
                  "🔄", "warning",
                  f"Puntaje: {review.overall_score:.0f}/100 — bajo el umbral 90 · " +
@@ -746,12 +879,15 @@ def run_pipeline(
 
         # ── Estadística (descriptiva + avanzada) si el documento trae datos ──
         if session.brief and session.final_proposal:
+            _stop, _ = _phase_heartbeater(session_id, "stats", "Calculando estadística", "📊")
             try:
                 import agents.statistics as statistics
                 session.brief.statistics = statistics.run(
                     session, session.final_proposal, api_key)
             except Exception:
                 pass
+            finally:
+                _stop.set()
 
         save_session(session)
         _mark_completed(session_id, approved=approved)

@@ -29,7 +29,10 @@ MISTRAL_BASE_URL = os.getenv("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
 CODESTRAL_BASE_URL = os.getenv("CODESTRAL_BASE_URL", "https://codestral.mistral.ai/v1")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 
-LLM_TIMEOUT_SEC = float(os.getenv("LLM_TIMEOUT_SEC", "600"))
+# Timeout por-llamada de los proveedores OpenAI-compat (mistral/codestral/deepseek).
+# Acotado (antes 600): el peor caso de _post_openai es LLM_TIMEOUT_SEC × LLM_MAX_RETRIES
+# + backoff; debe quedar muy por debajo del watchdog de "sin actividad" (30 min).
+LLM_TIMEOUT_SEC = float(os.getenv("LLM_TIMEOUT_SEC", "300"))
 
 # Rotación de constructores por ciclo de redacción:
 #   ciclo 1 → Mistral, ciclo 2 → Codestral, ciclo 3 → DeepSeek, ciclo 4 → Mistral…
@@ -90,7 +93,12 @@ MAX_PIPELINE_RESTARTS = int(os.getenv("MAX_PIPELINE_RESTARTS", "10"))
 # healthcheck falle y el hosting reinicie el contenedor, matando TODAS las
 # sesiones en curso. Si se supera, el pipeline corta y entrega la mejor versión
 # lograda como inconclusa — igual que al agotar MAX_PIPELINE_RESTARTS.
-MAX_PIPELINE_WALLCLOCK_SEC = int(os.getenv("MAX_PIPELINE_WALLCLOCK_SEC", "2700"))  # 45 min
+# INVARIANTE DE COHERENCIA: debe ser MENOR que el watchdog de "sin actividad"
+# (db.queries._STALE_RUNNING_MINUTES*60 = 1800s), para que el pipeline corte y
+# ENTREGUE la mejor versión ANTES de que el watchdog marque la sesión 'failed'.
+# 1500 (25 min) < 1800 (30 min). Además se evalúa DENTRO del ciclo (antes de las
+# fases caras), no solo al tope del for (ver core/pipeline._wallclock_exceeded).
+MAX_PIPELINE_WALLCLOCK_SEC = int(os.getenv("MAX_PIPELINE_WALLCLOCK_SEC", "1500"))  # 25 min
 # Umbral mínimo (0-100) que debe alcanzar cada fase en su gate intermedio.
 PHASE_REVIEW_THRESHOLD = int(os.getenv("PHASE_REVIEW_THRESHOLD", "90"))
 

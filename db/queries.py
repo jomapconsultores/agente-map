@@ -78,6 +78,42 @@ def _reconcile_stale_running(row: dict) -> dict:
     return row
 
 
+def reconcile_orphaned_running(limit: int = 500) -> int:
+    """Barrido ACTIVO de reconciliación (no perezoso): marca 'failed' las sesiones
+    que quedaron 'running' sin latido reciente (>_STALE_RUNNING_MINUTES).
+
+    _reconcile_stale_running solo corre al LEER una sesión (list_sessions/get_session),
+    así que una sesión muerta por un redeploy/crash que nadie abre se queda 'running'
+    para siempre (loader infinito en la UI). Esta función se invoca al ARRANCAR el
+    servidor (ver api.main lifespan) para cerrar ese hueco de inmediato tras cada
+    redeploy. Reutiliza el mismo umbral y _last_heartbeat, así que es idempotente y
+    segura aunque algún día se escale a más de un worker. Devuelve cuántas reconcilió.
+    """
+    try:
+        sb = get_client(service_role=True)
+        rows = (
+            sb.table("sessions")
+            .select("session_id, status, progress_steps, started_at, created_at")
+            .eq("status", "running")
+            .limit(limit)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return 0
+    n = 0
+    for r in rows:
+        try:
+            before = r.get("status")
+            _reconcile_stale_running(r)  # reutiliza umbral + _last_heartbeat + UPDATE
+            if before == "running" and r.get("status") == "failed":
+                n += 1
+        except Exception:
+            continue  # best-effort: una fila problemática no aborta el barrido
+    return n
+
+
 def list_sessions(limit: int = 20, *, approved_only: bool = False,
                   owner_user_id: Optional[str] = None) -> list[dict[str, Any]]:
     """Devuelve las sesiones más recientes con campos resumidos.

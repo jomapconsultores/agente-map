@@ -14,6 +14,7 @@ basado en `urllib` (sin dependencias nuevas). Anthropic usa su SDK propio.
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -30,7 +31,7 @@ _OPENAI_COMPAT = {
                  lambda: config.DEEPSEEK_API_KEY),
 }
 
-_MAX_RETRIES = 6
+_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))  # antes 6; acotado por el watchdog
 _BACKOFF_BASE = 4.0  # segundos
 _BACKOFF_CAP = 30.0  # máximo 30s por reintento (antes llegaba a 128s)
 _RETRYABLE = (429, 500, 502, 503, 504)
@@ -106,7 +107,15 @@ def _complete_anthropic(system: str, prompt: str, max_tokens: int,
         system=system,
         messages=[{"role": "user", "content": prompt}],
     )
-    return resp.content[0].text
+    # Extracción defensiva: Claude puede devolver bloques no-text (p. ej. tool_use)
+    # o un content vacío según stop_reason. Leer content[0].text a ciegas lanzaba
+    # IndexError/AttributeError, que tumbaba la fase con una excepción cruda en vez
+    # de dejar que complete_builder rotara al siguiente proveedor.
+    text = next((b.text for b in resp.content
+                 if getattr(b, "type", None) == "text" and getattr(b, "text", "")), "")
+    if not text:
+        raise LLMError(f"Claude sin texto (stop_reason={getattr(resp, 'stop_reason', '?')!r})")
+    return text
 
 
 def complete(provider: str, *, system: str, prompt: str, max_tokens: int,

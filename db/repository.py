@@ -62,6 +62,8 @@ def _session_row(s: ProjectSession) -> dict:
         "brief":         _dump(s.brief),
         "financial":     _dump(s.financial),
         "research_approved": bool(s.research_approved),
+        "gate2_passed": bool(getattr(s, "gate2_passed", False)),
+        "gate3_passed": bool(getattr(s, "gate3_passed", False)),
     }
 
 
@@ -201,9 +203,12 @@ def load_resumable_state(session_id: str) -> Optional[dict]:
         return None
     try:
         sb = get_client(service_role=True)
-        row = sb.table("sessions").select(
-            "id, analysis, brief, financial, current_cycle, research_approved"
-        ).eq("session_id", session_id).limit(1).execute()
+        # select("*") en vez de una lista fija: tolera que las columnas de checkpoint
+        # (gate2_passed/gate3_passed, migración 010) aún no existan — con una lista
+        # explícita, PostgREST erraría y romperíamos el resume ya existente por
+        # research_approved hasta aplicar la migración.
+        row = sb.table("sessions").select("*").eq(
+            "session_id", session_id).limit(1).execute()
         if not row.data:
             return None
         data = row.data[0]
@@ -230,9 +235,62 @@ def load_resumable_state(session_id: str) -> Optional[dict]:
             "financial": financial,
             "proposal_versions": proposal_versions,
             "current_cycle": int(data.get("current_cycle") or 0),
+            "gate2_passed": bool(data.get("gate2_passed")),
+            "gate3_passed": bool(data.get("gate3_passed")),
         }
     except Exception:
         return None  # reanudar es best-effort: si falla, el pipeline arranca de cero
+
+
+def list_recently_interrupted(hours: int = 6, max_attempts: int = 3) -> list[dict]:
+    """Sesiones interrumpidas (marcadas 'failed' por el watchdog/reconciliación)
+    que son REANUDABLES: tienen investigación aprobada y aún no agotaron los
+    reintentos automáticos. Se consulta al arrancar el servidor para auto-reanudar
+    trabajos que un redeploy dejó a medias, sin repetir la fase 1 (la más cara).
+
+    Filtra por completed_at reciente (no reanimar sesiones viejas), research_approved
+    (hay checkpoint que reutilizar) y resume_attempts < max_attempts (corta el bucle
+    redeploy→resume→redeploy). Devuelve los campos que consume core.pipeline.run_pipeline.
+    """
+    if not is_enabled():
+        return []
+    try:
+        import datetime
+        sb = get_client(service_role=True)
+        cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                  - datetime.timedelta(hours=hours)).isoformat()
+        rows = (
+            sb.table("sessions")
+            .select("session_id, user_input, input_mode, doc_type_key, template_text, "
+                    "support_docs, owner_user_id, research_approved, resume_attempts, completed_at")
+            .eq("status", "failed")
+            .eq("research_approved", True)
+            .gte("completed_at", cutoff)
+            .limit(100)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return []  # si la columna resume_attempts aún no existe, no auto-reanudamos
+    return [r for r in rows if int(r.get("resume_attempts") or 0) < max_attempts]
+
+
+def bump_resume_attempts(session_id: str) -> None:
+    """Incrementa resume_attempts ANTES de relanzar un auto-resume, para que un
+    trabajo que muere una y otra vez (p. ej. redeploys en cadena) deje de reanimarse
+    tras max_attempts en vez de entrar en un bucle infinito."""
+    if not is_enabled():
+        return
+    try:
+        sb = get_client(service_role=True)
+        cur = (sb.table("sessions").select("resume_attempts")
+               .eq("session_id", session_id).limit(1).execute())
+        n = int((cur.data or [{}])[0].get("resume_attempts") or 0)
+        sb.table("sessions").update({"resume_attempts": n + 1}).eq(
+            "session_id", session_id).execute()
+    except Exception:
+        pass  # best-effort; si la columna no existe, el auto-resume simplemente no cuenta
 
 
 def cancel_session(session_id: str) -> bool:

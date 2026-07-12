@@ -310,7 +310,15 @@ def run(session, proposal: str, api_key: str) -> ReviewResult:
         model=MODEL, max_tokens=MAX_TOKENS_REVIEWER, system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}],
     )
-    return _finalize_result(response.content[0].text, brief, cycle, stats, coverage,
+    # Extracción defensiva (ver agents.llm._complete_anthropic): un content sin
+    # bloque de texto (stop_reason inesperado) reventaba content[0].text con
+    # IndexError, tumbando la Fase 4 en vez de fallar de forma controlada.
+    text = next((b.text for b in response.content
+                 if getattr(b, "type", None) == "text" and getattr(b, "text", "")), "")
+    if not text:
+        from agents.llm import LLMError
+        raise LLMError(f"Reviewer Claude sin texto (stop_reason={getattr(response, 'stop_reason', '?')!r})")
+    return _finalize_result(text, brief, cycle, stats, coverage,
                             citations, approval_threshold, element_threshold)
 
 

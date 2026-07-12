@@ -9,8 +9,10 @@ Auth multiusuario:
 Endpoints de datos: /modules, /doc_types, /extract, /propuestas[...],
 /propuestas/{id}/(markdown|word|excel|retry|reviews).
 
-Trabajos largos: el pipeline corre en BackgroundTasks; el estado se persiste en
-sessions.status (pending → running → approved/failed).
+Trabajos largos: el pipeline se despacha vía core.jobs (cola Redis + worker
+separado si REDIS_URL está configurada; si no, hilo daemon en el propio web). El
+estado se persiste en sessions.status (pending → running → approved/failed) y al
+arrancar se reconcilian/auto-reanudan las sesiones que un redeploy dejó a medias.
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ import os
 import tempfile
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -32,8 +35,9 @@ from pydantic import BaseModel, Field
 
 import config
 import api.auth as auth_lib
-from core.pipeline import run_pipeline, run_scouting
+from core import jobs
 from db import queries
+from db import repository
 from db import users as users_repo
 from db import permissions_repo
 from models.doc_types import get_doc_type, list_doc_types, list_modules
@@ -56,10 +60,61 @@ except Exception as _sentry_err:  # noqa: BLE001
     print(f"[sentry] observabilidad deshabilitada: {_sentry_err}")
 
 
+def _startup_recover() -> None:
+    """Al arrancar el servidor: (1) reconcilia sesiones 'running' huérfanas que un
+    redeploy/crash dejó colgadas (sin esto quedan en loader infinito hasta que un
+    humano las abre), y (2) auto-reanuda las interrumpidas que son reanudables
+    (investigación ya aprobada), sin repetir la fase más cara. Todo best-effort:
+    nunca debe impedir que la API levante."""
+    try:
+        n = queries.reconcile_orphaned_running()
+        print(f"[startup] reconciliadas {n} sesiones 'running' huérfanas")
+    except Exception as e:  # noqa: BLE001
+        print(f"[startup] reconciliación falló (no fatal): {e}")
+
+    try:
+        pendientes = repository.list_recently_interrupted(hours=6, max_attempts=3)
+    except Exception as e:  # noqa: BLE001
+        print(f"[startup] auto-resume: no se pudo listar interrumpidas ({e})")
+        pendientes = []
+    resumidas = 0
+    for row in pendientes:
+        try:
+            if not repository.load_resumable_state(row["session_id"]):
+                continue  # sin checkpoint seguro que reutilizar
+            repository.bump_resume_attempts(row["session_id"])  # ANTES de relanzar
+            jobs.submit_pipeline(
+                user_input=row.get("user_input") or "",
+                mode=row.get("input_mode") or "text",
+                doc_type_key=row.get("doc_type_key") or "auto",
+                template_text=row.get("template_text") or "",
+                support_docs=[(d.get("name"), d.get("text"))
+                              for d in (row.get("support_docs") or [])],
+                session_id=row["session_id"],
+                owner_user_id=row.get("owner_user_id"),
+                # is_admin/allowed_modules NO se persisten en la fila; el owner ya pasó
+                # el gate de módulos al crear la sesión, así que se omite el re-gate.
+                is_admin=False,
+                allowed_modules=None,
+            )
+            resumidas += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"[startup] auto-resume de {row.get('session_id')} falló: {e}")
+    if resumidas:
+        print(f"[startup] auto-reanudadas {resumidas} sesiones interrumpidas")
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    _startup_recover()
+    yield
+
+
 app = FastAPI(
     title="agente_map API",
     description="Pipeline multiagente multiusuario de entregables de alto nivel.",
     version="0.3.0",
+    lifespan=_lifespan,
 )
 
 API_KEY_ENV = "AGENTE_MAP_API_KEY"
@@ -1010,19 +1065,13 @@ def create_proposal(req: CreateProposalRequest, background: BackgroundTasks,
     owner = p.user_id  # None si es la clave maestra
     is_admin, allowed_modules = p.is_admin, list(p.modules)
 
-    def _run():
-        try:
-            run_pipeline(
-                user_input=req.user_input, mode=req.mode,
-                doc_type_key=(req.doc_type_key or "auto"),
-                template_text=req.template_text, support_docs=req.support_docs,
-                session_id=session_id, owner_user_id=owner,
-                is_admin=is_admin, allowed_modules=allowed_modules,
-            )
-        except Exception:
-            pass
-
-    background.add_task(_run)
+    jobs.submit_pipeline(
+        user_input=req.user_input, mode=req.mode,
+        doc_type_key=(req.doc_type_key or "auto"),
+        template_text=req.template_text, support_docs=req.support_docs,
+        session_id=session_id, owner_user_id=owner,
+        is_admin=is_admin, allowed_modules=allowed_modules,
+    )
     return CreateProposalResponse(session_id=session_id, status="pending")
 
 
@@ -1038,13 +1087,7 @@ def buscar_oportunidades(req: ScoutRequest, background: BackgroundTasks,
     session_id = uuid.uuid4().hex[:8]
     owner = p.user_id
 
-    def _run():
-        try:
-            run_scouting(user_input=req.user_input, session_id=session_id, owner_user_id=owner)
-        except Exception:
-            pass
-
-    background.add_task(_run)
+    jobs.submit_scouting(user_input=req.user_input, session_id=session_id, owner_user_id=owner)
     return CreateProposalResponse(session_id=session_id, status="pending")
 
 
@@ -1148,15 +1191,9 @@ def generar_desde_seleccion(session_id: str, req: GenerateRequest, background: B
             user_input = f"{user_input}\n{url}"
         new_id = uuid.uuid4().hex[:8]
 
-        def _run(new_id=new_id, user_input=user_input, mode=mode, opp=opp):
-            try:
-                run_pipeline(user_input=user_input, mode=mode, doc_type_key="propuesta",
+        jobs.submit_pipeline(user_input=user_input, mode=mode, doc_type_key="propuesta",
                              session_id=new_id, owner_user_id=owner, seed_opportunity=opp,
                              is_admin=is_admin, allowed_modules=allowed_modules)
-            except Exception:
-                pass
-
-        background.add_task(_run)
         created.append(CreateProposalResponse(session_id=new_id, status="pending"))
 
     if not created:
@@ -1286,16 +1323,10 @@ def retry_proposal(session_id: str, background: BackgroundTasks,
     owner = row.get("owner_user_id")
     is_admin, allowed_modules = p.is_admin, list(p.modules)
 
-    def _run():
-        try:
-            run_pipeline(user_input=user_input, mode=mode, doc_type_key=doc_type_key,
+    jobs.submit_pipeline(user_input=user_input, mode=mode, doc_type_key=doc_type_key,
                          template_text=template_text, support_docs=support_docs,
                          session_id=session_id, owner_user_id=owner,
                          is_admin=is_admin, allowed_modules=allowed_modules)
-        except Exception:
-            pass
-
-    background.add_task(_run)
     return CreateProposalResponse(session_id=session_id, status="pending")
 
 

@@ -1,0 +1,53 @@
+# Despliegue con worker separado (Cambio 9): el pipeline deja de correr dentro del
+# proceso web y pasa a una cola Redis que procesa el servicio `worker`. Así un
+# redeploy/restart del `web` YA NO mata los trabajos en curso — la causa raíz de
+# las sesiones "interrumpidas — sin actividad".
+#
+# En Coolify: usa "Docker Compose" como build pack y apunta a este archivo. Las
+# variables de entorno (ANTHROPIC_API_KEY, SUPABASE_*, etc.) se definen en Coolify
+# y se comparten con ambos servicios vía `env_file`/Environment.
+#
+# NOTA: sin REDIS_URL el código cae automáticamente al modo hilo dentro del web
+# (core/jobs.py), así que este compose es OPCIONAL — el arreglo funciona sin él,
+# pero el worker separado es la solución definitiva a los redeploys.
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: .
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    # CMD por defecto del Dockerfile = uvicorn (servicio web).
+
+  worker:
+    build: .
+    restart: unless-stopped
+    command: ["python", "worker.py"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis-data:

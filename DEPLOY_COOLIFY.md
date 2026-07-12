@@ -80,6 +80,10 @@ SQL Editor: https://supabase.com/dashboard/project/rzdpfhflkzwylaaplgml/sql/new
 (ver `db/006_webauthn.sql` y `db/008_captacion.sql` si faltan las tablas
 `webauthn_credentials`, `prospectos`, `clientes`).
 
+> **Migración 010 (recomendada):** aplica `db/010_resume_attempts.sql` para
+> habilitar el auto-resume tras redeploy y los checkpoints de gate. Es aditiva e
+> idempotente; sin ella el sistema sigue funcionando (solo no auto-reanuda).
+
 ## 5. Deploy y verificación
 Pulsa **Deploy**. Cuando esté "Running":
 
@@ -91,9 +95,19 @@ curl -H "X-API-Key: TU_API_KEY" https://TU-DOMINIO/doc_types
 Swagger en `https://TU-DOMINIO/docs`.
 
 ## Notas operativas
-- **Tareas largas**: el pipeline corre in-process. Si Coolify reinicia el
-  contenedor durante un pipeline, ese trabajo queda en `running`. La UI lo
-  muestra como "inconcluso" y se puede reintentar.
+- **Tareas largas**: por defecto (sin `REDIS_URL`) el pipeline corre in-process en
+  un hilo. Si Coolify reinicia el contenedor a mitad, el trabajo se pierde, pero al
+  arrancar el servidor **reconcilia** las sesiones huérfanas y **auto-reanuda** las
+  reanudables (investigación ya aprobada) sin repetir la fase cara.
+- **Worker separado (recomendado, elimina la pérdida por redeploy)**: despliega con
+  `docker-compose.yml` (build pack "Docker Compose"), que levanta `web` + `worker` +
+  `redis`. Define `REDIS_URL` (el compose ya la inyecta como `redis://redis:6379/0`).
+  Con Redis, los endpoints ENCOLAN el trabajo y el `worker` lo procesa en su propio
+  proceso: un redeploy del `web` ya no mata los pipelines en curso.
+- **Timeouts/umbrales** (opcionales, con defaults coherentes): `ANTHROPIC_TIMEOUT_SEC`,
+  `ANTHROPIC_MAX_RETRIES`, `LLM_TIMEOUT_SEC`, `LLM_MAX_RETRIES`,
+  `MAX_PIPELINE_WALLCLOCK_SEC`, `STALE_RUNNING_MINUTES`. Invariante: el wall-clock
+  (1500 s) debe ser menor que el watchdog (`STALE_RUNNING_MINUTES`×60 = 1800 s).
 - **Persistencia**: no se necesita disco persistente; los .docx/.xlsx se
   regeneran on-demand desde Supabase.
 - **Actualizar**: cada push a `agente-map` en GitHub puede disparar redeploy

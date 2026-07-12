@@ -205,6 +205,14 @@ class ProjectSession:
     # aprobada (ver core/pipeline.py: research_approved).
     research_approved: bool = False
 
+    # Checkpoints de grano fino: True cuando el ciclo vigente ya superó Gate 2
+    # (redacción) o Gate 3 (paquete). Al reanudar una sesión que murió DESPUÉS de
+    # aprobarlos, se salta la redacción multipasada y los gates ya pasados. Se
+    # INVALIDAN (→ False) cuando Fase 4 rechaza y fuerza reinicio, porque el
+    # borrador aprobado deja de ser válido (ver core/pipeline.py).
+    gate2_passed: bool = False
+    gate3_passed: bool = False
+
     # Observaciones NO críticas de gates que igual APROBARON (score ≥ umbral pero con
     # "issues"). Antes se perdían para siempre — solo se capturaba feedback cuando un
     # gate rechazaba. Se inyectan como contexto advisorio (no correcciones forzosas)
