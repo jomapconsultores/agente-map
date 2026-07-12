@@ -20,9 +20,14 @@ from __future__ import annotations
 import os
 import threading
 
-# Techo de tiempo del job en la cola: debe superar el wall-clock del pipeline
-# (config.MAX_PIPELINE_WALLCLOCK_SEC) con margen para setup/teardown.
-_JOB_TIMEOUT_SEC = int(os.getenv("RQ_JOB_TIMEOUT", "5400"))  # 90 min
+import config
+
+# Techo de tiempo del job en la cola: apenas por encima del wall-clock del pipeline
+# (config.MAX_PIPELINE_WALLCLOCK_SEC) para setup/teardown. No debe ser mucho mayor: un
+# job que sobreviva largo rato podría voltear a 'approved' una sesión que el watchdog
+# ya marcó 'failed' (ver core.pipeline._mark_completed, que ahora sólo pisa 'running').
+_JOB_TIMEOUT_SEC = int(os.getenv(
+    "RQ_JOB_TIMEOUT", str(config.MAX_PIPELINE_WALLCLOCK_SEC + 600)))  # ≈ 35 min
 
 _queue = None
 _queue_resolved = False

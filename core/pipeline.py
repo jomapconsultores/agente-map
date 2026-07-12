@@ -109,6 +109,20 @@ def _wallclock_exceeded(start: float) -> bool:
     return (time.monotonic() - start) > config.MAX_PIPELINE_WALLCLOCK_SEC
 
 
+def _gate_force_pass(session: "ProjectSession", gate_result: dict, attempt: int) -> bool:
+    """Escape hatch: si tras GATE_FORCE_PASS_AFTER intentos un gate intermedio sigue
+    rechazando pero el score está a GATE_FORCE_PASS_MARGIN del umbral, deja pasar al
+    veredicto final (Claude) en vez de reiniciar sin fin. Un solo 'critical' falso-
+    positivo de un constructor podía atorar el pipeline para siempre. NO aplica a tipos
+    estrictos (tesis/artículo/TDR/peer_review), que deben fallar cerrado."""
+    strict = bool(session.brief and
+                  session.brief.doc_type_key in phase_review._STRICT_FAIL_CLOSED_TYPES)
+    if strict or attempt < config.GATE_FORCE_PASS_AFTER:
+        return False
+    score = float(gate_result.get("score", 0) or 0)
+    return score >= config.PHASE_REVIEW_THRESHOLD - config.GATE_FORCE_PASS_MARGIN
+
+
 def _keep_quality_notes(session: "ProjectSession", phase: str, gate_result: dict) -> None:
     """Un gate que APRUEBA con observaciones no críticas ("issues") las perdía para
     siempre: solo se capturaba feedback cuando el gate RECHAZABA. Las acumula como
@@ -187,10 +201,13 @@ def _mark_completed(session_id: str, approved: bool):
         return
     try:
         from utils.supabase_client import get_client, run_with_retry
+        # .eq("status","running"): sólo cierra la sesión si SIGUE en curso. Si el
+        # watchdog ya la marcó 'failed' (proceso tardío/zombi), no la revivimos a
+        # 'approved' — evita que un job que sobrevivió al watchdog pise su decisión.
         run_with_retry(lambda: get_client(service_role=True).table("sessions").update(
             {"status": "approved" if approved else "failed",
              "completed_at": "now()"}
-        ).eq("session_id", session_id).execute())
+        ).eq("session_id", session_id).eq("status", "running").execute())
     except Exception:
         pass
 
@@ -298,7 +315,14 @@ def run_scouting(
     _log(session_id, "scout_start", "Iniciando búsqueda de oportunidades", "🔍", "running",
          "Investigando convocatorias activas con financiamiento no reembolsable")
     try:
-        opportunities = scout.run(session, api_key)
+        # La búsqueda (web + LLM) puede tardar varios minutos sin emitir progreso;
+        # sin latido, el watchdog marcaría la sesión "sin actividad".
+        _stop, _ = _phase_heartbeater(session_id, "scout_start",
+                                      "Buscando oportunidades", "🔍")
+        try:
+            opportunities = scout.run(session, api_key)
+        finally:
+            _stop.set()
         if not opportunities:
             _log(session_id, "scout_end", "Sin oportunidades verificables", "🚫", "done")
             session.approved = False
@@ -358,8 +382,14 @@ def run_pipeline(
     _mark_running(session_id, owner_user_id, user_input=user_input, mode=mode)
 
     # FASE 0 — Clasificación (Mistral). Una sola vez para todo el pipeline.
-    resolved_type = _resolve_doc_type(user_input, template_text, support_docs,
-                                       api_key, doc_type_key)
+    # Corre ANTES del bucle y usa un LLM: con latido para que no cuente como inactividad.
+    _log(session_id, "fase0", "Clasificando tipo de documento", "🔍", "running")
+    _stop, _ = _phase_heartbeater(session_id, "fase0", "Clasificando tipo de documento", "🔍")
+    try:
+        resolved_type = _resolve_doc_type(user_input, template_text, support_docs,
+                                           api_key, doc_type_key)
+    finally:
+        _stop.set()
 
     # Re-valida el módulo DESPUÉS de conocer el tipo real: el gate en el endpoint HTTP
     # solo pudo revisar el doc_type_key crudo recibido (a menudo "auto"), que aquí el
@@ -722,15 +752,20 @@ def run_pipeline(
                 finally:
                     _stop.set()
                 session.phase_reviews.append({"attempt": attempt, **g2})
-                if not g2["passed"]:
+                if not g2["passed"] and not _gate_force_pass(session, g2, attempt):
                     pending_corrections = (g2.get("critical") or []) + (g2.get("issues") or [])
                     _log(session_id, "gate2", f"Gate 2 no aprobado — reiniciando{cycle_label}",
                          "🔄", "warning",
                          f"Puntaje: {g2.get('score', '—')}/100 · " +
                          "; ".join(pending_corrections[:3] or [g2.get("recommendation", "")])[:200])
                     continue  # VUELVE AL INICIO
-                _log(session_id, "gate2", f"Gate 2 aprobado{cycle_label}", "✅", "done",
-                     f"Puntaje: {g2.get('score', '—')}/100")
+                if not g2["passed"]:
+                    _log(session_id, "gate2",
+                         f"Gate 2 forzado tras {attempt} intentos (puntaje {g2.get('score','—')}/100) — "
+                         f"lo decide el veredicto final{cycle_label}", "⏭️", "warning")
+                else:
+                    _log(session_id, "gate2", f"Gate 2 aprobado{cycle_label}", "✅", "done",
+                         f"Puntaje: {g2.get('score', '—')}/100")
                 _keep_quality_notes(session, "Gate 2 — redacción", g2)
                 # Checkpoint: si la sesión muere ahora, al reanudar se salta la redacción.
                 session.gate2_passed = True
@@ -790,7 +825,7 @@ def run_pipeline(
                 finally:
                     _stop.set()
                 session.phase_reviews.append({"attempt": attempt, **g3})
-                if not g3["passed"]:
+                if not g3["passed"] and not _gate_force_pass(session, g3, attempt):
                     pending_corrections = (g3.get("critical") or []) + (g3.get("issues") or [])
                     # El borrador va a reescribirse → invalida el checkpoint de Gate 2.
                     session.gate2_passed = False
@@ -800,8 +835,13 @@ def run_pipeline(
                          f"Puntaje: {g3.get('score', '—')}/100 · " +
                          "; ".join(pending_corrections[:3] or [g3.get("recommendation", "")])[:200])
                     continue  # VUELVE AL INICIO: reinvestiga y reescribe
-                _log(session_id, "gate3", f"Gate 3 aprobado{cycle_label}", "✅", "done",
-                     f"Puntaje: {g3.get('score', '—')}/100")
+                if not g3["passed"]:
+                    _log(session_id, "gate3",
+                         f"Gate 3 forzado tras {attempt} intentos (puntaje {g3.get('score','—')}/100) — "
+                         f"lo decide el veredicto final{cycle_label}", "⏭️", "warning")
+                else:
+                    _log(session_id, "gate3", f"Gate 3 aprobado{cycle_label}", "✅", "done",
+                         f"Puntaje: {g3.get('score', '—')}/100")
                 _keep_quality_notes(session, "Gate 3 — paquete completo", g3)
                 # Checkpoint: si la sesión muere ahora, al reanudar se salta directo a Fase 4.
                 session.gate3_passed = True

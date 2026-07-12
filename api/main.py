@@ -31,7 +31,7 @@ from fastapi import (
     BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile,
 )
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 import config
 import api.auth as auth_lib
@@ -261,11 +261,26 @@ class LoginRequest(BaseModel):
 
 
 class CreateProposalRequest(BaseModel):
-    user_input: str = Field(..., min_length=10, description="Idea, tema o propuesta a procesar.")
+    # Sin min_length aquí: Pydantic lo cuenta SIN strip, así que "          " (espacios)
+    # pasaba y el pipeline arrancaba con un tema vacío ("Documento sin especificar
+    # contenido"). La longitud real (tras strip) y la regla "tema O documentos" se
+    # validan en el model_validator de abajo, que sí ve todos los campos.
+    user_input: str = Field("", description="Idea, tema o propuesta a procesar.")
     mode: str = Field("text", pattern="^(search|text|file|url)$")
     doc_type_key: Optional[str] = Field("auto", description="'auto' o una clave de DOC_TYPES.")
     template_text: str = ""
     support_docs: list[tuple[str, str]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _tema_o_documentos(self):
+        tema = (self.user_input or "").strip()
+        hay_docs = bool(self.support_docs) or bool((self.template_text or "").strip())
+        if len(tema) < 10 and not hay_docs:
+            raise ValueError(
+                "Especifica un tema real (al menos 10 caracteres no vacíos) "
+                "o adjunta al menos un documento/plantilla.")
+        self.user_input = tema  # normaliza: guarda el tema ya sin espacios sobrantes
+        return self
 
 
 class CreateProposalResponse(BaseModel):
@@ -1186,6 +1201,12 @@ def generar_desde_seleccion(session_id: str, req: GenerateRequest, background: B
         title = opp.get("title") or funder.get("name") or row.get("user_input")
         url = funder.get("url") or ""
         user_input = f"{title} — {funder.get('name', '')}".strip(" —")
+        # Si título y financiador venían vacíos, el f-string degenera en "None"/"" tras
+        # el strip → se saltaría esta oportunidad en vez de lanzar un pipeline sobre nada.
+        _ui = (user_input or "").strip()
+        if len(_ui) < 5 or _ui.lower() == "none":
+            continue
+        user_input = _ui
         mode = "url" if url.startswith("http") else "search"
         if mode == "url":
             user_input = f"{user_input}\n{url}"
@@ -1310,8 +1331,21 @@ def retry_proposal(session_id: str, background: BackgroundTasks,
     require_doc_module(p, row.get("doc_type_key") or "auto")
     if not config.ANTHROPIC_API_KEY:
         raise HTTPException(500, "ANTHROPIC_API_KEY no configurada en el servidor")
-    user_input = row["user_input"]
+    # No relanzar un trabajo ya en curso (evita pipelines concurrentes sobre el mismo
+    # registro, que se pisan el progreso y el estado entre sí).
+    if row.get("status") in ("running", "pending"):
+        raise HTTPException(409, "Este entregable ya está en curso; espera a que "
+                                 "termine o cancélalo antes de reintentar.")
+    # No reintentar una sesión "envenenada": si su tema quedó vacío o como el placeholder
+    # "(initializing)" (caso histórico), reintentar volvería a investigar la nada y a
+    # fallar. Se fuerza al usuario a reescribir el tema con «Mejorar tema».
     mode = row.get("input_mode") or "text"
+    _ui = (row.get("user_input") or "").strip()
+    _has_docs = bool(row.get("support_docs")) or bool((row.get("template_text") or "").strip())
+    if (len(_ui) < 10 or _ui.lower() == "(initializing)") and not _has_docs:
+        raise HTTPException(409, "Esta sesión no tiene un tema válido; usa «Mejorar tema» "
+                                 "para reescribirlo antes de reintentar.")
+    user_input = _ui
     # Si el intento previo NO llegó a aprobarse, vuelve a CLASIFICAR desde cero
     # ("auto") en vez de congelar el tipo detectado antes: una mala clasificación
     # previa (p. ej. una cotización marcada como "artículo científico") hacía que

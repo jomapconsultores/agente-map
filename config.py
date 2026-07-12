@@ -99,8 +99,16 @@ MAX_PIPELINE_RESTARTS = int(os.getenv("MAX_PIPELINE_RESTARTS", "10"))
 # 1500 (25 min) < 1800 (30 min). Además se evalúa DENTRO del ciclo (antes de las
 # fases caras), no solo al tope del for (ver core/pipeline._wallclock_exceeded).
 MAX_PIPELINE_WALLCLOCK_SEC = int(os.getenv("MAX_PIPELINE_WALLCLOCK_SEC", "1500"))  # 25 min
-# Umbral mínimo (0-100) que debe alcanzar cada fase en su gate intermedio.
-PHASE_REVIEW_THRESHOLD = int(os.getenv("PHASE_REVIEW_THRESHOLD", "90"))
+# Umbral mínimo (0-100) de cada gate INTERMEDIO (fases 1-3). Antes 90: tan estricto
+# como el veredicto final, así que el pipeline reiniciaba sin fin y NUNCA llegaba a la
+# Fase 4 (el veredicto real de Claude). El gate intermedio es un filtro de calidad, no
+# el juez final; se baja a 70 para que el documento avance y sea Claude quien decida.
+PHASE_REVIEW_THRESHOLD = int(os.getenv("PHASE_REVIEW_THRESHOLD", "70"))
+# Escape hatch: si tras GATE_FORCE_PASS_AFTER intentos un gate sigue rechazando pero el
+# score está dentro de GATE_FORCE_PASS_MARGIN del umbral, se deja pasar al veredicto
+# final (evita que un 'critical' falso-positivo de un constructor atore el pipeline).
+GATE_FORCE_PASS_AFTER = int(os.getenv("GATE_FORCE_PASS_AFTER", "3"))
+GATE_FORCE_PASS_MARGIN = int(os.getenv("GATE_FORCE_PASS_MARGIN", "15"))
 
 # ── Scouting de oportunidades (búsqueda → reporte con calificación ponderada) ─
 # "Buscar proyectos" detecta varias convocatorias y entrega un reporte por cada
@@ -193,9 +201,12 @@ SECOND_OPINION_PROVIDER = os.getenv("SECOND_OPINION_PROVIDER", "deepseek")
 
 # ── Pipeline ───────────────────────────────────────────────────────────────
 MAX_REVIEW_CYCLES = 5
-# Verificación exigente: se requiere ≥90 en CADA elemento Y ≥90 global.
-APPROVAL_THRESHOLD = 90       # Score global mínimo para aprobar propuesta (0-100)
-ELEMENT_THRESHOLD = 90        # Score mínimo EXIGIDO en cada criterio individual (0-100)
+# Veredicto final. Antes 90/90 fijo: inalcanzable para un documento "genérico" con los
+# proveedores actuales → siempre "inconcluso". Se baja a 85/80 y se hace configurable.
+# Los tipos exigentes (tesis/artículo/TDR/peer_review) conservan su umbral estricto
+# propio vía doc_type.strict_threshold en reviewer.py (no se ven afectados por esto).
+APPROVAL_THRESHOLD = int(os.getenv("APPROVAL_THRESHOLD", "85"))   # global mínimo (0-100)
+ELEMENT_THRESHOLD = int(os.getenv("ELEMENT_THRESHOLD", "80"))     # mínimo por criterio (0-100)
 VIABILITY_THRESHOLD = 55      # Score mínimo de viabilidad para continuar (0-100)
 
 # ── Search ─────────────────────────────────────────────────────────────────

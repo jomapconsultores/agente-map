@@ -251,10 +251,11 @@ def _finalize_result(raw_text: str, brief: DocumentBrief, cycle: int, stats: dic
     if coverage["missing"]:
         if fmt_label:
             criterion_scores[fmt_label] = min(criterion_scores[fmt_label], element_threshold - 5.0)
-        # ≥3 secciones obligatorias ausentes (o más de un tercio de ellas) es una señal
-        # demasiado fuerte de documento incompleto para dejarlo pasar por que el LLM
-        # auditor no lo haya marcado como crítico.
-        if len(coverage["missing"]) >= 3 or coverage["coverage_ratio"] < 0.67:
+        # Solo se bloquea si falta MÁS DE LA MITAD de las secciones obligatorias. El
+        # umbral absoluto anterior (≥3 ausentes) castigaba documentos largos con muchas
+        # secciones aunque cubrieran la mayoría; y ≥0.67 era tan estricto que bloqueaba
+        # por diseño. El faltante parcial ya penaliza "Formato" arriba.
+        if coverage["coverage_ratio"] < 0.5:
             result.critical_issues = list(result.critical_issues) + [
                 "Verificación mecánica: faltan secciones obligatorias del brief: "
                 + ", ".join(coverage["missing"])
@@ -280,9 +281,25 @@ def _finalize_result(raw_text: str, brief: DocumentBrief, cycle: int, stats: dic
                 + (f"{n_broken} referencia(s) con DOI/URL que no resuelve(n)." if n_broken else "")
             ]
 
+    # ── Criterios de "lineamientos" SIN contenido en el brief no deben gatear ──────
+    # Un documento genérico no tiene marco legal/normativo nacional o internacional; el
+    # LLM auditor puntúa esos criterios bajo (30-70) y bloquearía el 90/90 por diseño.
+    # Se excluyen del cálculo de aprobación cuando el brief no trae esos lineamientos.
+    def _empty_guideline(crit: str) -> bool:
+        cl = crit.lower()
+        if "lineamiento" not in cl:
+            return False
+        if "nacional" in cl and not getattr(brief, "national_guidelines", None):
+            return True
+        if "internacional" in cl and not getattr(brief, "international_guidelines", None):
+            return True
+        return False
+
+    gating_scores = {c: s for c, s in criterion_scores.items() if not _empty_guideline(c)}
+
     # ── REGLA DE APROBACIÓN ESTRICTA (calculada en código, no por el LLM) ──────
     result.failing_elements = [
-        f"{name}: {score:.0f}/100" for name, score in criterion_scores.items()
+        f"{name}: {score:.0f}/100" for name, score in gating_scores.items()
         if score < element_threshold
     ]
     if not stats["within_limits"]:
@@ -290,7 +307,7 @@ def _finalize_result(raw_text: str, brief: DocumentBrief, cycle: int, stats: dic
     if coverage["missing"]:
         result.failing_elements.append("Secciones ausentes: " + ", ".join(coverage["missing"]))
 
-    all_ok = all(s >= element_threshold for s in criterion_scores.values())
+    all_ok = all(s >= element_threshold for s in gating_scores.values())
     result.approved = (
         result.overall_score >= approval_threshold
         and all_ok

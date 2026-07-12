@@ -2255,7 +2255,19 @@
       } else { user_input = textVal; }
 
       if (cfg.dropzone === "required" && !uploadedDocs.length) { toast("Sube al menos un documento.", "err"); return; }
-      if (user_input.length < 10) user_input = DEFAULT_INPUT[currentAction] || "Procesa el material adjunto al más alto nivel profesional y académico.";
+      // No inventar un tema-placeholder cuando NO hay material: eso creaba entregables
+      // "sin especificar contenido" que fallan siempre. Sólo se usa el default si el
+      // usuario aportó documentos, plantilla o enlaces.
+      if (user_input.length < 10) {
+        const hasMaterial = (cfg.dropzone && cfg.dropzone !== "none" && uploadedDocs.length)
+          || (cfg.urls && collectUrls().length) || (templateDoc && templateDoc.text);
+        if (!hasMaterial) {
+          toast("Escribe el tema o las instrucciones (mínimo 10 caracteres).", "err");
+          const el = $("user_input"); if (el) el.focus();
+          return;
+        }
+        user_input = DEFAULT_INPUT[currentAction] || "Procesa el material adjunto al más alto nivel profesional y académico.";
+      }
 
       const support_docs = (cfg.dropzone && cfg.dropzone !== "none") ? uploadedDocs.map(d => [d.name, d.text]) : [];
       const template_text = templateDoc ? templateDoc.text : "";
@@ -2290,6 +2302,12 @@
 
     /* ════════ Formatos ════════ */
     const isIncon = s => ["pending","running","failed"].includes(s);
+    // Una sesión "envenenada": inconclusa y sin tema real (vacío o el placeholder
+    // "(initializing)"). Reintentarla vuelve a fallar; hay que reescribir el tema.
+    const inputLooksEmpty = v => {
+      const t = (v || "").trim().toLowerCase();
+      return !t || t === "(initializing)" || t.length < 10;
+    };
     const statusPill = s => `<span class="pill ${["pending","running","approved","failed"].includes(s)?s:"pending"}">${statusLabel(s)}</span>`;
     const statusLabel = s => ({pending:"en cola", running:"en curso", approved:"completado", failed:"inconcluso"}[s] || s || "-");
     const goNoGoPill = s => { if (!s) return ""; const cls = s==="GO"?"go":s==="NO-GO"?"no-go":"conditional"; return `<span class="pill ${cls}">${s}</span>`; };
@@ -2454,7 +2472,11 @@
         const canStop = inProgress || d.status === "failed";
         $("pause-btn").style.display = inProgress ? "" : "none";
         $("cancel-btn").style.display = canStop ? "" : "none";
-        $("retry-btn").style.display = isIncon(d.status) ? "" : "none";
+        // Si la sesión quedó sin tema (envenenada), NO ofrecer "Reintentar" (volvería a
+        // fallar): sólo "Mejorar tema", que reescribe el tema y crea una sesión válida.
+        const _hasDocs = (d.support_docs && d.support_docs.length) || (d.template_text || "").trim();
+        const poisoned = isIncon(d.status) && !d.approved && inputLooksEmpty(d.user_input) && !_hasDocs;
+        $("retry-btn").style.display = (isIncon(d.status) && !poisoned) ? "" : "none";
         $("refine-btn").style.display = isIncon(d.status) ? "" : "none";
         $("del-btn").style.display = "";
         const error = parseError(d.error_message);
@@ -2509,7 +2531,13 @@
         }
         $("drawer-body").innerHTML = inconHtml + deadlineBannerHtml + nogoHtml + overviewHtml + progressHtml + scoresHtml + verifHtml + feasHtml + errHtml + dlHtml + evHtml + previewHtml + inputHtml;
         renderList();
-      } catch (e) { $("drawer-body").innerHTML = `<div class="list-empty">${esc(e.message)}</div>`; }
+      } catch (e) {
+        // En auto-refresh (silent) NO borrar el panel por un fallo transitorio de red:
+        // dejaría al usuario con "Cargando…"/error eterno aunque el proceso siga vivo.
+        // Se conserva lo mostrado y se reintenta en el próximo poll.
+        if (silent) { console.warn("openDrawer refresh falló:", e.message); return; }
+        $("drawer-body").innerHTML = `<div class="list-empty">${esc(e.message)}</div>`;
+      }
     }
     function closeDrawer() {
       $("drawer-backdrop").classList.remove("show"); $("drawer").classList.remove("show");
@@ -2734,6 +2762,12 @@
 
     async function retrySession() {
       if (!activeId) return;
+      // Sesión sin tema real: reintentar volvería a fallar → mandar a "Mejorar tema".
+      if (inputLooksEmpty(refineCurrentInput)) {
+        toast("Esta sesión no tiene un tema válido. Escríbelo en «Mejorar tema».", "err");
+        openRefineModal();
+        return;
+      }
       if (!confirm("¿Continuar este entregable inconcluso? El proceso correrá de nuevo y consumirá API.")) return;
       $("retry-btn").disabled = true;
       try { await api(`/propuestas/${activeId}/retry`, { method:"POST" }); toast("Proceso reanudado · encolado.", "ok"); openDrawer(activeId); }

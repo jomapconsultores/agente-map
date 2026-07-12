@@ -134,10 +134,9 @@ def is_pause_requested(session_id: str) -> bool:
     if not is_enabled():
         return False
     try:
-        from utils.supabase_client import get_client
-        sb = get_client(service_role=True)
-        row = sb.table("sessions").select("pause_requested").eq(
-            "session_id", session_id).limit(1).execute()
+        row = run_with_retry(lambda: get_client(service_role=True)
+                             .table("sessions").select("pause_requested")
+                             .eq("session_id", session_id).limit(1).execute())
         return bool((row.data or [{}])[0].get("pause_requested", False))
     except Exception:
         return False
@@ -148,10 +147,9 @@ def request_pause(session_id: str) -> bool:
     if not is_enabled():
         return False
     try:
-        from utils.supabase_client import get_client
-        sb = get_client(service_role=True)
-        sb.table("sessions").update({"pause_requested": True}).eq(
-            "session_id", session_id).execute()
+        run_with_retry(lambda: get_client(service_role=True).table("sessions")
+                       .update({"pause_requested": True})
+                       .eq("session_id", session_id).execute())
         return True
     except Exception as e:
         raise SupabaseSaveError(f"{type(e).__name__}: {e}") from e
@@ -166,9 +164,9 @@ def clear_pause_requested(session_id: str) -> None:
     if not is_enabled():
         return
     try:
-        sb = get_client(service_role=True)
-        sb.table("sessions").update({"pause_requested": False}).eq(
-            "session_id", session_id).execute()
+        run_with_retry(lambda: get_client(service_role=True).table("sessions")
+                       .update({"pause_requested": False})
+                       .eq("session_id", session_id).execute())
     except Exception:
         pass  # best-effort, igual que el resto del control de progreso
 
@@ -208,13 +206,14 @@ def load_resumable_state(session_id: str) -> Optional[dict]:
     if not is_enabled():
         return None
     try:
-        sb = get_client(service_role=True)
         # select("*") en vez de una lista fija: tolera que las columnas de checkpoint
         # (gate2_passed/gate3_passed, migración 010) aún no existan — con una lista
         # explícita, PostgREST erraría y romperíamos el resume ya existente por
-        # research_approved hasta aplicar la migración.
-        row = sb.table("sessions").select("*").eq(
-            "session_id", session_id).limit(1).execute()
+        # research_approved hasta aplicar la migración. run_with_retry: un corte
+        # transitorio al reanudar tras minutos ocioso devolvía None → reinvestigaba
+        # desde cero (fase más cara).
+        row = run_with_retry(lambda: get_client(service_role=True).table("sessions")
+                             .select("*").eq("session_id", session_id).limit(1).execute())
         if not row.data:
             return None
         data = row.data[0]
@@ -229,10 +228,9 @@ def load_resumable_state(session_id: str) -> Optional[dict]:
         financial = (_dc_from_dict(FinancialPackage, data["financial"])
                      if data.get("financial") else None)
 
-        proposals_resp = (
-            sb.table("proposal_versions").select("cycle, content")
-            .eq("session_id", data["id"]).order("cycle").execute()
-        )
+        proposals_resp = run_with_retry(lambda: get_client(service_role=True)
+                                        .table("proposal_versions").select("cycle, content")
+                                        .eq("session_id", data["id"]).order("cycle").execute())
         proposal_versions = [r["content"] for r in (proposals_resp.data or []) if r.get("content")]
 
         return {
@@ -373,28 +371,34 @@ def save_session(session: ProjectSession) -> str | None:
         return None
 
     try:
-        sb = get_client(service_role=True)
+        # Envuelto en run_with_retry: este es el write que PERSISTE el documento
+        # producido. Tras minutos de LLM la conexión keep-alive puede estar muerta y
+        # el primer upsert lanzaría RemoteProtocolError → se perdía el entregable ya
+        # generado. Es idempotente (upsert on_conflict + delete-antes-de-insert), así
+        # que reintentar recreando el pool es seguro.
+        def _do():
+            sb = get_client(service_role=True)
+            row = _session_row(session)
+            resp = _upsert_session_tolerant(sb, row)
+            if not resp.data:
+                raise SupabaseSaveError("upsert sessions devolvió data vacía")
+            session_uuid = resp.data[0]["id"]
 
-        # Upsert session
-        row = _session_row(session)
-        resp = _upsert_session_tolerant(sb, row)
-        if not resp.data:
-            raise SupabaseSaveError("upsert sessions devolvió data vacía")
-        session_uuid = resp.data[0]["id"]
+            # Reemplazar borradores y revisiones (idempotente ante reintentos)
+            sb.table("proposal_versions").delete().eq("session_id", session_uuid).execute()
+            sb.table("reviews").delete().eq("session_id", session_uuid).execute()
 
-        # Reemplazar borradores y revisiones (idempotente ante reintentos)
-        sb.table("proposal_versions").delete().eq("session_id", session_uuid).execute()
-        sb.table("reviews").delete().eq("session_id", session_uuid).execute()
+            prop_rows = _proposal_rows(session_uuid, session)
+            if prop_rows:
+                sb.table("proposal_versions").insert(prop_rows).execute()
 
-        prop_rows = _proposal_rows(session_uuid, session)
-        if prop_rows:
-            sb.table("proposal_versions").insert(prop_rows).execute()
+            rev_rows = _review_rows(session_uuid, session)
+            if rev_rows:
+                sb.table("reviews").insert(rev_rows).execute()
 
-        rev_rows = _review_rows(session_uuid, session)
-        if rev_rows:
-            sb.table("reviews").insert(rev_rows).execute()
+            return session_uuid
 
-        return session_uuid
+        return run_with_retry(_do)
 
     except SupabaseSaveError:
         raise
