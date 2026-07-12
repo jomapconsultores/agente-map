@@ -136,14 +136,31 @@ def _pause_if_requested(session_id: str, session: "ProjectSession",
     return True
 
 
-def _mark_running(session_id: str, owner_user_id: Optional[str] = None):
+def _mark_running(session_id: str, owner_user_id: Optional[str] = None, *,
+                  user_input: Optional[str] = None, mode: Optional[str] = None,
+                  doc_type_key: Optional[str] = None):
     if not repository.is_enabled():
         return
     try:
         from utils.supabase_client import get_client, run_with_retry
-        row = {"session_id": session_id, "status": "running",
-               "started_at": "now()", "user_input": "(initializing)",
-               "input_mode": "text", "doc_type_key": "propuesta"}
+        row = {"session_id": session_id, "status": "running", "started_at": "now()",
+               # Limpia el estado del intento anterior. Sin resetear progress_steps,
+               # sus timestamps rancios hacían que el watchdog marcara la NUEVA corrida
+               # como "sin actividad 30 min" apenas arrancaba (el bug del falso
+               # "interrumpido" al reintentar). También se limpia el error/fin previo.
+               "progress_steps": [], "current_phase": "",
+               "error_message": None, "completed_at": None}
+        # NO sobrescribir el tema real con un placeholder: antes se escribía
+        # "(initializing)" y, si la corrida moría antes de save_session (p. ej. por una
+        # desconexión de Supabase), la sesión quedaba con ese placeholder como
+        # user_input PARA SIEMPRE → cada reintento investigaba "(initializing)" en vez
+        # del tema real. Se escribe el tema recibido.
+        if user_input is not None:
+            row["user_input"] = user_input
+        if mode:
+            row["input_mode"] = mode
+        if doc_type_key:
+            row["doc_type_key"] = doc_type_key
         if owner_user_id:
             row["owner_user_id"] = owner_user_id
         run_with_retry(lambda: get_client(service_role=True).table("sessions")
@@ -272,7 +289,8 @@ def run_scouting(
         session_id=session_id, user_input=user_input, input_mode="search",
         doc_type_key="propuesta", owner_user_id=owner_user_id,
     )
-    _mark_running(session_id, owner_user_id)
+    _mark_running(session_id, owner_user_id, user_input=user_input,
+                  mode="search", doc_type_key="propuesta")
     # Simetría con run_pipeline: si un usuario pausó una sesión de scouting
     # mientras estaba "running" (el endpoint /pause lo permite), el flag queda
     # escrito para siempre porque run_scouting nunca lo consulta ni lo limpia.
@@ -337,7 +355,7 @@ def run_pipeline(
     session_id = session_id or uuid.uuid4().hex[:8]
     support_docs = support_docs or []
 
-    _mark_running(session_id, owner_user_id)
+    _mark_running(session_id, owner_user_id, user_input=user_input, mode=mode)
 
     # FASE 0 — Clasificación (Mistral). Una sola vez para todo el pipeline.
     resolved_type = _resolve_doc_type(user_input, template_text, support_docs,
