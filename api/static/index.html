@@ -1857,6 +1857,32 @@
       lockMsg("Sesión cerrada.", "ok"); initLock();
     }
 
+    /* ════════ Cierre de sesión automático tras 30 min de inactividad ════════ */
+    /* El contador se reinicia con cualquier actividad y se sincroniza entre
+       pestañas vía localStorage. Solo cierra si hay una sesión activa. */
+    (function () {
+      var IDLE_MS = 30 * 60 * 1000;
+      var SYNC_KEY = "__idle_last_activity";
+      var EVENTS = ["mousemove", "mousedown", "keydown", "scroll", "touchstart", "click", "wheel"];
+      var timer, lastSync = 0;
+      function sessionActive() { return !!authToken || !!masterKey; }
+      function fire() {
+        if (sessionActive()) { try { lockNow(); } catch (e) {} lockMsg("Sesión cerrada por inactividad.", "ok"); }
+      }
+      function reset() { clearTimeout(timer); timer = setTimeout(fire, IDLE_MS); }
+      function onActivity() {
+        reset();
+        var now = Date.now();
+        if (now - lastSync > 5000) {
+          lastSync = now;
+          try { localStorage.setItem(SYNC_KEY, String(now)); } catch (e) {}
+        }
+      }
+      EVENTS.forEach(function (ev) { window.addEventListener(ev, onActivity, { passive: true }); });
+      window.addEventListener("storage", function (e) { if (e.key === SYNC_KEY) reset(); });
+      reset();
+    })();
+
     /* ════════ Usuarios (admin) ════════ */
     async function refreshPendingBadge() {
       try {
