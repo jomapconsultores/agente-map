@@ -281,16 +281,42 @@ def citation_stats(text: str, citation_style: str = "") -> dict:
 # ════════════════════════════════════════════════════════════════════════════
 #  CÁLCULOS COMPARTIDOS (fuente de verdad para Word y Excel)
 # ════════════════════════════════════════════════════════════════════════════
+def _bnum(v) -> float:
+    """Coerción numérica tolerante para celdas de presupuesto (defensiva:
+    agents.financial ya normaliza a float, pero un dataset rehidratado o de otra
+    fuente puede traer strings tipo '12.500,00 USD')."""
+    try:
+        if isinstance(v, str):
+            v = v.replace(",", "").replace("$", "").replace("USD", "").strip()
+        return float(v)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _row_solicitado(it) -> float:
+    """Monto solicitado del rubro. Si viene 0 pero hay cantidad×costo, lo deriva
+    como cantidad*costo − contraparte (clamp ≥0). Sin esto, un rubro donde el LLM
+    llenó cantidad y costo_unitario pero omitió fuente_solicitada salía en $0 (fila
+    y total descuadrados). El resto de contraparte evita duplicar rubros totalmente
+    cofinanciados (donde fuente_solicitada=0 es correcto)."""
+    sol = _bnum(it.get("fuente_solicitada", 0))
+    if not sol:
+        linea = _bnum(it.get("cantidad", 0)) * _bnum(it.get("costo_unitario", 0))
+        if linea:
+            sol = max(0.0, linea - _bnum(it.get("contraparte", 0)))
+    return sol
+
+
 def budget_totals(financial) -> dict:
     items = financial.budget_items if financial else []
-    total_solicitado = sum(i.get("fuente_solicitada", 0) for i in items)
-    total_contraparte = sum(i.get("contraparte", 0) for i in items)
+    total_solicitado = sum(_row_solicitado(i) for i in items)
+    total_contraparte = sum(_bnum(i.get("contraparte", 0)) for i in items)
     total = total_solicitado + total_contraparte
     by_cat: dict = {}
     for i in items:
         cat = i.get("categoria", "Sin categoría")
         by_cat.setdefault(cat, 0.0)
-        by_cat[cat] += i.get("fuente_solicitada", 0) + i.get("contraparte", 0)
+        by_cat[cat] += _row_solicitado(i) + _bnum(i.get("contraparte", 0))
     return {
         "total_solicitado": total_solicitado,
         "total_contraparte": total_contraparte,
@@ -643,9 +669,10 @@ def build_excel(brief, financial, out_path: Path):
         wsp.cell(row=row, column=3, value=it.get("unidad", ""))
         wsp.cell(row=row, column=4, value=it.get("cantidad", 0))
         wsp.cell(row=row, column=5, value=it.get("costo_unitario", 0))
-        # Solicitado: usa el valor extraído, pero si es 0 y hay cantidad×costo, calcula
-        sol = it.get("fuente_solicitada", 0)
-        contrap = it.get("contraparte", 0)
+        # Solicitado: usa el valor extraído; si es 0 y hay cantidad×costo, lo deriva
+        # (ver _row_solicitado) para que la fila y el total no queden descuadrados.
+        sol = _row_solicitado(it)
+        contrap = _bnum(it.get("contraparte", 0))
         wsp.cell(row=row, column=6, value=sol)
         wsp.cell(row=row, column=7, value=contrap)
         # Total por fila = Solicitado + Contraparte (fórmula viva)

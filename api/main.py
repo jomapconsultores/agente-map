@@ -1048,11 +1048,22 @@ async def extract(files: list[UploadFile] = File(...), p: Principal = Depends(ge
     if len(files) > MAX_EXTRACT_FILES:
         raise HTTPException(413, f"Máximo {MAX_EXTRACT_FILES} archivos por carga.")
     out = []
+    total = 0
     for f in files:
+        # Validar el tamaño ANTES de materializar el archivo en RAM: UploadFile.size
+        # ya viene calculado por el parser multipart. Sin esto, `await f.read()`
+        # copiaba a memoria un archivo de cualquier tamaño antes del chequeo (vector
+        # de DoS por RAM con peticiones concurrentes). También se acota el total.
+        size = f.size or 0
+        if size > MAX_EXTRACT_BYTES:
+            raise HTTPException(413, f"'{f.filename}' supera 20 MB.")
+        total += size
+        if total > MAX_EXTRACT_BYTES * MAX_EXTRACT_FILES:
+            raise HTTPException(413, "La carga total supera el límite permitido.")
         data = await f.read()
         if not data:
             raise HTTPException(400, f"'{f.filename}' está vacío.")
-        if len(data) > MAX_EXTRACT_BYTES:
+        if len(data) > MAX_EXTRACT_BYTES:  # defensa en profundidad si f.size es None
             raise HTTPException(413, f"'{f.filename}' supera 20 MB.")
         try:
             text = file_reader.read_upload(f.filename, data)
@@ -1500,6 +1511,7 @@ def crear_oficio(req: OficioRequest, p: Principal = Depends(get_principal)):
 @app.get("/oficios")
 def listar_oficios(limit: int = Query(50, ge=1, le=200), p: Principal = Depends(get_principal)):
     """Lista los oficios del usuario."""
+    require_module(p, "oficios")  # gate de módulo coherente con el resto de /oficios/*
     _require_supabase()
     from db import oficio_repo
     owner = p.owner_filter()
@@ -1788,6 +1800,7 @@ def listar_prospectos(
     limit: int = Query(200, ge=1, le=500),
     p: Principal = Depends(get_principal),
 ):
+    require_module(p, "captacion")  # gate de módulo coherente con el resto de captación
     _require_supabase()
     from db import captacion_repo
     return captacion_repo.list_prospectos(

@@ -24,6 +24,22 @@ organizas para análisis. NO inventes valores. Si no hay datos numéricos analiz
 """
 
 
+def _clip_preserve_tail(text: str, n: int = 60000, tail_chars: int = 18000) -> str:
+    """Trunca preservando el inicio y el tramo final del documento (tablas de datos,
+    series y anexos suelen ir al final). El truncado ciego por el frente
+    (proposal[:40000]) dejaba invisible todo lo posterior al corte — para una tesis
+    de 25-45k palabras eso omitía la mayor parte de los datos numéricos reales."""
+    text = (text or "").strip()
+    if len(text) <= n:
+        return text
+    head_budget = n - tail_chars - 200
+    if head_budget <= 0:
+        return text[:n]
+    return (text[:head_budget]
+            + "\n\n[…tramo intermedio omitido por longitud…]\n\n"
+            + text[-tail_chars:])
+
+
 def _build_prompt(brief: DocumentBrief, proposal: str) -> str:
     return f"""
 Documento: {brief.title}
@@ -38,7 +54,7 @@ grupos, relaciones entre dos variables). Para cada conjunto elige el "type" adec
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DOCUMENTO:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{proposal[:40000]}
+{_clip_preserve_tail(proposal)}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Responde SOLO con este JSON (sin texto antes ni después). Si no hay datos reales: {{"datasets": []}}.

@@ -115,10 +115,23 @@ def _search_deadline_in_page(url: str) -> Optional[date]:
     if not url or not url.startswith("http"):
         return None
     try:
+        import json
         from tools.search import execute_fetch_page
-        content = execute_fetch_page(url)
-        if not content:
+        raw = execute_fetch_page(url)
+        if not raw:
             return None
+        # execute_fetch_page SIEMPRE devuelve un JSON serializado
+        # ({"url","domain","text"} o {"url","error"/"note"}), nunca el texto crudo.
+        # Antes se escaneaba ese JSON como si fuera el texto de la página (con url/
+        # domain al frente y los saltos de línea escapados como '\n' literales), lo
+        # que degradaba la extracción de la fecha. Se parsea y se usa el campo 'text'.
+        try:
+            page = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        content = page.get("text") or ""
+        if not content:
+            return None  # respuesta de error/note (PDF no extraíble, 403…): sin texto
 
         # Buscar patrones de fecha cerca de palabras clave de CIERRE de postulación.
         # "plazo" a secas es demasiado genérico (coincide con "plazo de ejecución",

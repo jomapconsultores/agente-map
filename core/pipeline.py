@@ -63,6 +63,40 @@ def _resolve_doc_type(user_input: str, template_text: str, support_docs: list,
         return "generico"
 
 
+def _last_used_builder(session, *, cycle: Optional[int] = None,
+                       research: bool = False) -> Optional[str]:
+    """Proveedor que REALMENTE construyó una fase, según session.builder_log
+    (ignora 'error'/None). `research=True` busca la última entrada de investigación;
+    `cycle=N` la última entrada de redacción de ese ciclo."""
+    for e in reversed(getattr(session, "builder_log", None) or []):
+        used = e.get("used")
+        if used in (None, "error"):
+            continue
+        if research:
+            if e.get("phase") in ("research", "research_brief"):
+                return used
+        elif cycle is not None:
+            if e.get("cycle") == cycle:
+                return used
+    return None
+
+
+def _reviewer_avoiding(assigned: str, used: Optional[str], primary: str) -> str:
+    """Elige el proveedor del gate garantizando revisión CRUZADA real.
+
+    Si el revisor asignado no coincide con quien construyó la fase (camino sano),
+    se conserva. Si coincide —porque el constructor primario cayó y complete_builder
+    hizo fallback justo al proveedor del gate— esa IA revisaría su propia salida; se
+    elige entonces otro proveedor distinto del usado Y del primario (posible caído).
+    'anthropic'/'error'/None → se conserva el asignado (no hay conflicto medible)."""
+    if not used or used in ("error", "anthropic") or used != assigned:
+        return assigned
+    for p in config.BUILDER_ROTATION:
+        if p != used and p != primary:
+            return p
+    return assigned  # sin alternativa viable: phase_review.review ya maneja fail-open/closed
+
+
 def _log(session_id: str, phase: str, label: str, icon: str = "⚙",
          status: str = "running", detail: str = "") -> None:
     """Registra el avance del pipeline en la BD para mostrarlo en la UI."""
@@ -462,6 +496,10 @@ def run_pipeline(
         session.proposal_versions = resumed_state["proposal_versions"] or []
         if session.proposal_versions:
             session.final_proposal = session.proposal_versions[-1]
+        # Rehidrata el historial de reviews en memoria: sin esto, el primer
+        # save_session tras reanudar (delete-then-insert por session_id) borraba de
+        # la BD todas las revisiones de los ciclos previos a la pausa.
+        session.review_results = resumed_state.get("review_results") or []
         session.research_approved = True
         # Continúa la numeración de ciclos donde se había pausado, en vez de
         # reiniciar en 1 (antes load_resumable_state calculaba current_cycle sin
@@ -634,11 +672,16 @@ def run_pipeline(
                         "Verifica que la investigación esté fundamentada en fuentes reales "
                         "(con URL), sin datos inventados, y que cubra lineamientos y requisitos."
                     )
+                # Si el investigador cayó en fallback al proveedor que hace de Gate 1,
+                # ese proveedor no debe auditar su propia salida: se elige otro.
+                g1_provider = _reviewer_avoiding(
+                    ROLE_REVIEW_RESEARCH, _last_used_builder(session, research=True),
+                    config.ROLE_RESEARCH)
                 _stop, _ = _phase_heartbeater(session_id, "gate1",
                                               f"Gate 1: auditando investigación{cycle_label}", "🔎")
                 try:
                     g1 = phase_review.review(
-                        ROLE_REVIEW_RESEARCH, phase="investigación",
+                        g1_provider, phase="investigación",
                         brief=session.brief, content=_research_content(session),
                         focus=g1_focus,
                     )
@@ -657,6 +700,25 @@ def run_pipeline(
                          f"Gate 1 (advisory, documento entregado){cycle_label}", "📝", "done",
                          f"Puntaje: {g1.get('score', '—')}/100 · observaciones enviadas al redactor")
                     _keep_quality_notes(session, "Gate 1 — análisis del documento", g1)
+                    research_approved = True
+                    session.research_approved = True
+                    try:
+                        repository.save_session(session)
+                    except Exception:
+                        pass
+                elif not g1["passed"] and _gate_force_pass(session, g1, attempt):
+                    # Escape-hatch coherente con Gate 2/3: tras GATE_FORCE_PASS_AFTER
+                    # intentos con score dentro del margen, deja de REINVESTIGAR (la
+                    # fase más cara) por un 'critical' persistente y trata Gate 1 como
+                    # aprobado-advisory — sus observaciones alimentan al redactor y el
+                    # veredicto final 90/90 decide. _gate_force_pass ya excluye los
+                    # tipos estrictos y solo dispara desde el intento GATE_FORCE_PASS_AFTER.
+                    pending_corrections = (g1.get("critical") or []) + (g1.get("issues") or [])
+                    _log(session_id, "gate1",
+                         f"Gate 1 forzado tras {attempt} intentos (puntaje {g1.get('score','—')}/100) — "
+                         f"se continúa a redacción; lo decide el veredicto final{cycle_label}",
+                         "⏭️", "warning")
+                    _keep_quality_notes(session, "Gate 1 — investigación", g1)
                     research_approved = True
                     session.research_approved = True
                     try:
@@ -689,6 +751,11 @@ def run_pipeline(
                     _keep_quality_notes(session, "Gate 1 — investigación", g1)
                     research_approved = True
                     session.research_approved = True
+                    # Las críticas de un Gate 1 FALLIDO de un ciclo anterior ya se
+                    # consumieron al reinvestigar; no deben filtrarse al redactor como
+                    # "correcciones del revisor" de redacción. Solo Gate 2/3/veredicto
+                    # deben alimentar pending_corrections de aquí en adelante.
+                    pending_corrections = []
                     # Checkpoint best-effort: antes solo se persistía en pausa manual
                     # explícita. Un crash/redeploy a mitad del loop (hasta 10 ciclos)
                     # perdía la investigación ya aprobada y /retry la repetía desde
@@ -730,7 +797,23 @@ def run_pipeline(
                 # ── FASE 2 — REDACCIÓN (IA redactora) ────────────────────────────
                 _log(session_id, "fase2", f"Redactando documento{cycle_label}",
                      "✍️", "running", "Codestral estructura y redacta la propuesta completa")
-                proposal = writer.run(session, pending_corrections, api_key, provider=ROLE_WRITER)
+                # try/except simétrico a Fase 1/3: writer.run rota y cae a Claude, pero
+                # si TODOS los proveedores fallan lanza LLMError. Sin capturarla, el
+                # except externo marcaba 'failed' con un error crudo y NUNCA llegaba a la
+                # garantía de entrega — el usuario quedaba sin nada en el ciclo 1.
+                try:
+                    proposal = writer.run(session, pending_corrections, api_key, provider=ROLE_WRITER)
+                except Exception as write_err:  # noqa: BLE001
+                    _log(session_id, "fase2",
+                         f"Error en redacción (ciclo {attempt}) — reintentando",
+                         "⚠️", "warning", str(write_err)[:200])
+                    if attempt < MAX_PIPELINE_RESTARTS:
+                        continue  # reintenta el ciclo (Fase 1 se salta: research_approved=True)
+                    if not session.inconclusive_reason:
+                        session.inconclusive_reason = (
+                            "La redacción falló tras agotar los proveedores; se intenta "
+                            "entregar el mejor documento posible. Revísalo antes de usarlo.")
+                    break  # → garantía de entrega tras el loop
                 pending_corrections = []  # ya se aplicaron en esta redacción
                 session.proposal_versions.append(proposal)
                 session.final_proposal = proposal
@@ -740,11 +823,16 @@ def run_pipeline(
                 # ── GATE 2 — la redacción la audita OTRA IA ──────────────────────
                 _log(session_id, "gate2", f"Gate 2: auditando redacción{cycle_label}",
                      "🔎", "running", "Mistral verifica secciones, formato y rigor")
+                # Si el redactor cayó en fallback al proveedor que hace de Gate 2, se
+                # elige otro para no auditar su propia salida (revisión cruzada real).
+                g2_provider = _reviewer_avoiding(
+                    ROLE_REVIEW_WRITER, _last_used_builder(session, cycle=session.current_cycle),
+                    ROLE_WRITER)
                 _stop, _ = _phase_heartbeater(session_id, "gate2",
                                               f"Gate 2: auditando redacción{cycle_label}", "🔎")
                 try:
                     g2 = phase_review.review(
-                        ROLE_REVIEW_WRITER, phase="redacción",
+                        g2_provider, phase="redacción",
                         brief=session.brief, content=proposal,
                         focus="Verifica secciones completas, cumplimiento de formato y lineamientos, "
                               "rigor y ausencia de relleno o datos inventados.",
@@ -869,6 +957,19 @@ def run_pipeline(
             try:
                 review = reviewer.run_dual(session, proposal, api_key) if dual \
                     else reviewer.run(session, proposal, api_key)
+            except Exception as verdict_err:  # noqa: BLE001
+                # El juez final (Claude) era el único punto sin manejo de error al
+                # cierre: una caída/rate-limit tiraba la corrida con un error crudo y
+                # se saltaba save_session (Word/Excel), pese a que el borrador YA existe.
+                # Se degrada a "entrega la mejor versión lograda" (garantía de entrega).
+                _log(session_id, "fase4",
+                     f"Veredicto final no disponible — se entrega el mejor borrador{cycle_label}",
+                     "⚠️", "warning", str(verdict_err)[:200])
+                if not session.inconclusive_reason:
+                    session.inconclusive_reason = (
+                        "El veredicto final no pudo ejecutarse (proveedor no disponible); "
+                        "se entrega el documento ya redactado para revisión manual.")
+                break  # → garantía de entrega + save_session tras el loop
             finally:
                 _stop.set()
             session.review_results.append(review)

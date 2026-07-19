@@ -1,5 +1,7 @@
 -- =============================================================================
--- agente_map — migración 010: auto-resume tras redeploy + checkpoints de gate
+-- agente_map — migración 013: auto-resume tras redeploy + checkpoints de gate
+-- (renumerada desde 010 para eliminar la colisión con 010_module_roles.sql; es
+--  aditiva/idempotente e independiente, por lo que aplicarla al final es seguro)
 --
 -- Cómo aplicarlo:
 --   1. Supabase → SQL Editor → New query

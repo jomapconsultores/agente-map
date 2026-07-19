@@ -22,11 +22,18 @@ def _extract_block(raw: str) -> str:
         raw = raw.split("```json")[1].split("```")[0].strip()
     elif "```" in raw:
         raw = raw.split("```")[1].split("```")[0].strip()
-    # Recorta al primer { ... último }
-    s = raw.find("{")
-    e = raw.rfind("}") + 1
-    if s >= 0 and e > s:
-        raw = raw[s:e]
+    # Recorta al primer delimitador ({ u [) y cierra con el correspondiente.
+    # Antes se recortaba siempre a {...}, lo que corrompía un array JSON top-level
+    # ('[{...},{...}]' → '{...},{...}', inválido). Se elige el delimitador que
+    # aparece primero para preservar objetos y arrays por igual.
+    s_obj = raw.find("{")
+    s_arr = raw.find("[")
+    candidates = [(p, close) for p, close in ((s_obj, "}"), (s_arr, "]")) if p >= 0]
+    if candidates:
+        s, close = min(candidates, key=lambda t: t[0])
+        e = raw.rfind(close) + 1
+        if e > s:
+            raw = raw[s:e]
     return raw
 
 

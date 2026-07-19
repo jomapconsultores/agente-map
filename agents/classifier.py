@@ -128,8 +128,22 @@ def _run_research_loop(client: anthropic.Anthropic, prompt: str) -> str:
             results = []
             for tc in [b for b in response.content if b.type == "tool_use"]:
                 handler = TOOL_HANDLERS.get(tc.name)
-                out = handler(**tc.input) if handler else json.dumps({"error": "tool not found"})
-                results.append({"type": "tool_result", "tool_use_id": tc.id, "content": out})
+                # try/except: un kwarg inesperado del modelo produce TypeError en el
+                # binding (antes del try interno del handler) y tumbaba el loop; se
+                # devuelve como tool_result is_error para que el modelo se recupere.
+                if handler:
+                    try:
+                        out = handler(**tc.input)
+                        is_err = False
+                    except Exception as e:  # noqa: BLE001
+                        out = json.dumps({"error": f"tool '{tc.name}' falló: {e}"},
+                                         ensure_ascii=False)
+                        is_err = True
+                else:
+                    out = json.dumps({"error": "tool not found"})
+                    is_err = True
+                results.append({"type": "tool_result", "tool_use_id": tc.id,
+                                "content": out, "is_error": is_err})
             messages.append({"role": "user", "content": results})
             continue
         for block in response.content:

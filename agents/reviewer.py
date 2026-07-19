@@ -297,6 +297,17 @@ def _finalize_result(raw_text: str, brief: DocumentBrief, cycle: int, stats: dic
 
     gating_scores = {c: s for c, s in criterion_scores.items() if not _empty_guideline(c)}
 
+    # El overall_score del LLM se calculó ponderando TAMBIÉN los criterios de
+    # lineamientos vacíos que acabamos de excluir del gating por criterio; si no se
+    # recalcula, esos mismos criterios vuelven a bloquear la aprobación vía el gate
+    # global (overall_score >= approval_threshold). Se recalcula sobre SOLO los
+    # criterios que gatean y se toma el MAX con el global del LLM: nunca endurece
+    # (all_ok y critical_issues siguen gateando, así que relajar el global es seguro),
+    # y el guard deja INTACTOS los documentos que sí traen lineamientos.
+    if gating_scores and len(gating_scores) < len(criterion_scores):
+        mean_gating = sum(gating_scores.values()) / len(gating_scores)
+        result.overall_score = max(result.overall_score, round(mean_gating, 1))
+
     # ── REGLA DE APROBACIÓN ESTRICTA (calculada en código, no por el LLM) ──────
     result.failing_elements = [
         f"{name}: {score:.0f}/100" for name, score in gating_scores.items()

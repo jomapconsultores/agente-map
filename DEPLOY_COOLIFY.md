@@ -80,7 +80,7 @@ SQL Editor: https://supabase.com/dashboard/project/rzdpfhflkzwylaaplgml/sql/new
 (ver `db/006_webauthn.sql` y `db/008_captacion.sql` si faltan las tablas
 `webauthn_credentials`, `prospectos`, `clientes`).
 
-> **Migración 010 (recomendada):** aplica `db/010_resume_attempts.sql` para
+> **Migración 013 (recomendada):** aplica `db/013_resume_attempts.sql` para
 > habilitar el auto-resume tras redeploy y los checkpoints de gate. Es aditiva e
 > idempotente; sin ella el sistema sigue funcionando (solo no auto-reanuda).
 

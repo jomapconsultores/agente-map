@@ -334,18 +334,36 @@ def _run_agent_loop(client: anthropic.Anthropic, prompt: str) -> str:
             tool_results = []
             for tc in tool_calls:
                 handler = TOOL_HANDLERS.get(tc.name)
+                # try/except: un kwarg inesperado del modelo (p.ej. deep_search con un
+                # campo extra) produce TypeError en el binding, ANTES del try interno
+                # del handler — sin esto, tumbaba todo el loop y rompía el contrato de
+                # la API (todo tool_use exige su tool_result). Se devuelve is_error.
                 if handler:
-                    result = handler(**tc.input)
+                    try:
+                        result = handler(**tc.input)
+                        is_err = False
+                    except Exception as e:  # noqa: BLE001
+                        result = json.dumps({"error": f"Tool '{tc.name}' falló: {e}"},
+                                            ensure_ascii=False)
+                        is_err = True
                 else:
                     result = json.dumps({"error": f"Tool '{tc.name}' not found"})
+                    is_err = True
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tc.id,
-                    "content": result
+                    "content": result,
+                    "is_error": is_err,
                 })
 
             messages.append({"role": "user", "content": tool_results})
         else:
+            # stop_reason inesperado (p.ej. 'max_tokens', 'refusal', 'pause_turn'):
+            # rescatar el texto parcial — _parse_result usa robust_json_loads, que
+            # cierra un JSON truncado — en vez de descartar todo el análisis.
+            for block in response.content:
+                if hasattr(block, "text") and block.text.strip():
+                    return block.text
             break
 
     raise RuntimeError("Claude completó el loop de herramientas sin devolver texto final (respuesta vacía)")

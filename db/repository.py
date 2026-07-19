@@ -17,7 +17,7 @@ from typing import Any, Optional
 import config
 from models.schemas import (
     AnalysisResult, DocumentBrief, EcuadorAlignment, FinancialPackage,
-    FunderInfo, ProjectSession,
+    FunderInfo, ProjectSession, ReviewResult,
 )
 from utils.supabase_client import get_client, run_with_retry
 
@@ -233,11 +233,27 @@ def load_resumable_state(session_id: str) -> Optional[dict]:
                                         .eq("session_id", data["id"]).order("cycle").execute())
         proposal_versions = [r["content"] for r in (proposals_resp.data or []) if r.get("content")]
 
+        # Recargar el historial de reviews de forma simétrica a proposal_versions:
+        # sin esto, la primera save_session tras reanudar (delete-then-insert por
+        # session_id, tomando solo session.review_results en memoria) BORRABA todas
+        # las revisiones de los ciclos previos a la pausa. Best-effort: un esquema
+        # antiguo de reviews no debe tumbar el resume (que reinvestigaría de cero).
+        try:
+            reviews_resp = run_with_retry(lambda: get_client(service_role=True)
+                                          .table("reviews").select("*")
+                                          .eq("session_id", data["id"]).order("cycle").execute())
+            review_results = [rr for rr in
+                              (_dc_from_dict(ReviewResult, r) for r in (reviews_resp.data or []))
+                              if rr]
+        except Exception:
+            review_results = []
+
         return {
             "analysis": analysis,
             "brief": brief,
             "financial": financial,
             "proposal_versions": proposal_versions,
+            "review_results": review_results,
             "current_cycle": int(data.get("current_cycle") or 0),
             "gate2_passed": bool(data.get("gate2_passed")),
             "gate3_passed": bool(data.get("gate3_passed")),
@@ -356,8 +372,18 @@ def _upsert_session_tolerant(sb, row: dict, max_attempts: int = 5):
             m = _MISSING_COLUMN_RE.search(str(e))
             if not m or m.group(1) not in attempt_row:
                 raise
-            del attempt_row[m.group(1)]
+            col = m.group(1)
+            del attempt_row[col]
             last_err = e
+            # El descarte silencioso ocultaba que un checkpoint no se persistía
+            # (research_approved/gate2_passed/gate3_passed → resume deshabilitado,
+            # el pipeline reinvestigaba de cero). Se hace RUIDOSO para que el
+            # operador aplique la migración pendiente.
+            print(f"[persistence][WARN] columna '{col}' ausente en el schema cache de "
+                  f"'sessions'; se DESCARTA del upsert. Aplica las migraciones pendientes "
+                  f"(db/009_resume_state.sql / db/013_resume_attempts.sql o POST /admin/migrate). "
+                  f"Si es un flag de checkpoint, el resume queda DESHABILITADO y el pipeline "
+                  f"reinvestigará desde cero.")
     raise SupabaseSaveError(f"upsert sessions: demasiadas columnas ausentes tras reintentos: {last_err}")
 
 

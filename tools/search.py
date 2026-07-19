@@ -127,8 +127,18 @@ def _domain(url: str) -> str:
 
 
 def _is_high_signal(url: str) -> bool:
+    # Las entradas con path (p.ej. "linkedin.com/pulse") se comparan contra host+path,
+    # no solo contra el dominio: _domain() recorta el path, así que "linkedin.com/pulse"
+    # in "linkedin.com" siempre daba False y esas entradas eran código muerto. Las
+    # entradas sin "/" se siguen comparando contra el dominio (evita falsos positivos
+    # de subcadena en tokens cortos como "un.org" o "gob.ec").
     d = _domain(url)
-    return any(sig in d for sig in HIGH_SIGNAL_DOMAINS)
+    full = re.sub(r"^https?://(www\.)?", "", (url or "")).lower()
+    for sig in HIGH_SIGNAL_DOMAINS:
+        target = full if "/" in sig else d
+        if sig in target:
+            return True
+    return False
 
 
 def _strip_html(raw: str, max_chars: int) -> str:

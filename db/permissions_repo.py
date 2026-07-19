@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from utils.supabase_client import get_client
+from utils.supabase_client import get_client, run_with_retry
 
 MODULES = ("captacion", "clientes", "investigacion", "proyectos", "oficios")
 
@@ -16,7 +16,15 @@ def _sb():
 
 
 def list_for_user(user_id: str) -> list[str]:
-    res = _sb().table("user_module_roles").select("module").eq("user_id", user_id).execute()
+    # run_with_retry: era el único acceso a BD del repo sin esta capa. Un corte
+    # keep-alive transitorio de Supabase lanzaba httpx.RemoteProtocolError, que
+    # _load_modules convertía en "0 módulos" (403 espurios en cada área) en vez de
+    # reintentar recreando el pool. run_with_retry solo reintenta errores de
+    # transporte y repropaga de inmediato un 4xx de PostgREST (p.ej. migración 010
+    # faltante), así que el fail-closed a [] sigue cubriendo SOLO ese caso.
+    res = run_with_retry(
+        lambda: _sb().table("user_module_roles").select("module").eq("user_id", user_id).execute()
+    )
     return sorted({r["module"] for r in (res.data or [])})
 
 
