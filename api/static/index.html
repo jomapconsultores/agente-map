@@ -171,19 +171,53 @@
     }
 
     /* ─────────── APP SHELL ─────────── */
-    .app { display:grid; grid-template-columns:260px 1fr; min-height:100vh; }
+    .app { display:grid; grid-template-columns:306px 1fr; min-height:100vh; }
     .app[hidden] { display:none; }
 
-    /* Sidebar */
+    /* Sidebar — DOS COLUMNAS: riel de módulos (76px) + panel de submenús (230px) */
     .sidebar {
-      background:linear-gradient(180deg,#1e293b 0%,#0f172a 100%);
       border-right:1px solid var(--line);
-      display:flex; flex-direction:column;
-      position:sticky; top:0; height:100vh; overflow-y:auto;
+      display:grid; grid-template-columns:76px 230px;
+      position:sticky; top:0; height:100vh;
     }
-    .sb-brand { display:flex; flex-direction:column; align-items:flex-start; gap:4px; padding:12px 16px 10px; border-bottom:1px solid rgba(255,255,255,.08); }
-    .sb-brand-logo { width:130px; height:auto; border-radius:5px; object-fit:contain; display:block; }
-    .sb-brand .tag { font-size:9.5px; color:#64748b; letter-spacing:.01em; }
+
+    /* ── Columna 1: riel de módulos ── */
+    .sb-rail {
+      background:linear-gradient(180deg,#16213a 0%,#0b1220 100%);
+      border-right:1px solid rgba(255,255,255,.07);
+      display:flex; flex-direction:column; overflow-y:auto;
+    }
+    .sb-rail-brand { padding:12px 6px 10px; border-bottom:1px solid rgba(255,255,255,.08); display:grid; place-items:center; }
+    .sb-rail-brand img { width:54px; height:auto; border-radius:5px; object-fit:contain; display:block; }
+    .sb-rail-nav { padding:8px 6px; flex:1; display:flex; flex-direction:column; gap:2px; }
+    .rail-item { position:relative; display:flex; flex-direction:column; align-items:center;
+      justify-content:center; gap:3px; padding:9px 2px; width:100%; border:0; cursor:pointer;
+      background:transparent; border-radius:var(--radius-xs); color:#94a3b8;
+      transition:background .12s, color .12s; }
+    .rail-item .ic { font-size:17px; line-height:1; opacity:.85; }
+    .rail-item .lb { font-size:9.5px; line-height:1.15; text-align:center; letter-spacing:.01em; }
+    .rail-item:hover { background:rgba(255,255,255,.07); color:#cbd5e1; }
+    .rail-item.active { background:rgba(37,99,235,.22); color:#93c5fd; font-weight:600; }
+    .rail-item.active .ic { opacity:1; }
+    .rail-item.active::before { content:""; position:absolute; left:0; top:8px; bottom:8px;
+      width:3px; border-radius:0 3px 3px 0; background:#3b82f6; }
+    .rail-badge { position:absolute; top:4px; right:9px; min-width:15px; height:15px; padding:0 4px;
+      border-radius:8px; background:var(--err, #dc2626); color:#fff; font-size:9px; font-weight:700;
+      display:grid; place-items:center; }
+
+    /* ── Columna 2: panel de submenús del módulo seleccionado ── */
+    .sb-panel {
+      background:linear-gradient(180deg,#1e293b 0%,#0f172a 100%);
+      display:flex; flex-direction:column; overflow-y:auto; min-width:0;
+    }
+    .sb-panel-head { padding:13px 14px 10px; border-bottom:1px solid rgba(255,255,255,.08); }
+    .sb-panel-head .t { font-size:12.5px; font-weight:700; color:#e2e8f0; letter-spacing:.02em; }
+    .sb-panel-head .tag { font-size:9.5px; color:#64748b; margin-top:3px; }
+    .sb-panel-body { padding:8px 10px; flex:1; }
+    .sb-group { display:none; }
+    .sb-group.show { display:block; }
+    .sb-group-hint { font-size:11.5px; color:#64748b; padding:12px 10px; line-height:1.55; }
+    .sb-panel-foot { border-top:1px solid rgba(255,255,255,.08); padding:12px 12px 0; margin-top:auto; }
     .sb-credit { font-size:9px; color:#334155; text-align:center; padding:6px 8px 8px; line-height:1.45; border-top:1px solid rgba(255,255,255,.05); }
     .sb-nav { padding:8px 10px; flex:1; }
     .sb-section { font-size:10px; text-transform:uppercase; letter-spacing:.08em;
@@ -534,7 +568,7 @@
 
     @media (max-width:860px) {
       .app { grid-template-columns:1fr; }
-      .sidebar { position:fixed; z-index:120; width:254px; transform:translateX(-100%); transition:transform .2s; }
+      .sidebar { position:fixed; z-index:120; width:306px; transform:translateX(-100%); transition:transform .2s; }
       .app.sb-open .sidebar { transform:none; }
       .hamb { display:inline-flex; }
       .topbar .search { max-width:none; }
@@ -676,74 +710,111 @@
   <div class="app" id="app" hidden>
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar">
-      <div class="sb-brand">
-        <img src="/logo.png" alt="MAP Proyectos" class="sb-brand-logo">
-        <div class="tag">JOMAP · CMAJ · Cuenca, Ecuador</div>
+      <!-- ── Columna 1: riel de módulos ── -->
+      <div class="sb-rail">
+        <div class="sb-rail-brand"><img src="/logo.png" alt="MAP Proyectos"></div>
+        <nav class="sb-rail-nav" id="sb-rail-nav">
+          <button class="rail-item active" data-rail="all" onclick="railTo('all')"><span class="ic">🏠</span><span class="lb">Inicio</span></button>
+          <button class="rail-item sb-mod" data-mod="captacion" data-rail="captacion" onclick="railTo('captacion')"><span class="ic">🎯</span><span class="lb">Captación</span></button>
+          <button class="rail-item sb-mod" data-mod="clientes" data-rail="clientes" onclick="railTo('clientes')"><span class="ic">👥</span><span class="lb">Clientes</span></button>
+          <button class="rail-item sb-mod" data-mod="investigacion" data-rail="investigacion" onclick="railTo('investigacion')"><span class="ic">🔬</span><span class="lb">Investig.</span></button>
+          <button class="rail-item sb-mod" data-mod="proyectos" data-rail="proyectos" onclick="railTo('proyectos')"><span class="ic">📊</span><span class="lb">Proyectos</span></button>
+          <button class="rail-item sb-mod" data-mod="oficios" data-rail="oficios" onclick="railTo('oficios')"><span class="ic">📝</span><span class="lb">Oficios</span></button>
+          <button class="rail-item" data-rail="estado" onclick="railTo('estado')"><span class="ic">⏳</span><span class="lb">Estado</span><span class="rail-badge" id="rail-incon" style="display:none">0</span></button>
+          <button class="rail-item" id="rail-admin" data-rail="admin" style="display:none" onclick="railTo('admin')"><span class="ic">⚙️</span><span class="lb">Admin</span><span class="rail-badge" id="rail-pending" style="display:none">0</span></button>
+        </nav>
       </div>
-      <nav class="sb-nav" id="sb-nav">
-        <button class="sb-item active" data-nav="all" onclick="navTo('all')"><span class="ic">🏠</span> Inicio</button>
 
-        <div class="sb-no-access" id="sb-no-access" style="display:none">
-          Aún no tienes ningún rol asignado. Contacta al administrador para que te dé acceso a un módulo.
+      <!-- ── Columna 2: submenús / datos del módulo seleccionado ── -->
+      <div class="sb-panel">
+        <div class="sb-panel-head">
+          <div class="t" id="sb-panel-title">Inicio</div>
+          <div class="tag">JOMAP · CMAJ · Cuenca, Ecuador</div>
         </div>
 
-        <div class="sb-mod" data-mod="captacion">
-          <div class="sb-section">🎯 Captación activa</div>
-          <button class="sb-item" data-nav="captacion" onclick="navTo('captacion')"><span class="ic">🔍</span> Buscar mercado</button>
-          <button class="sb-item" data-nav="prospectos" onclick="navTo('prospectos')"><span class="ic">📋</span> Prospectos <span class="sb-badge" id="sb-prosp" style="display:none">0</span></button>
-        </div>
+        <div class="sb-panel-body" id="sb-nav">
+          <div class="sb-no-access" id="sb-no-access" style="display:none">
+            Aún no tienes ningún rol asignado. Contacta al administrador para que te dé acceso a un módulo.
+          </div>
 
-        <div class="sb-mod" data-mod="captacion">
-          <div class="sb-section">📥 Prospección / Importar</div>
-          <button class="sb-item sub" onclick="openImportarModal()"><span class="ic">⬆️</span> Importar lista <span class="add">＋</span></button>
-        </div>
+          <div class="sb-group show" data-group="all">
+            <div class="sb-section">Inicio</div>
+            <button class="sb-item active" data-nav="all" onclick="navTo('all')"><span class="ic">🏠</span> Ver todos los entregables</button>
+            <div class="sb-group-hint">Elige un módulo en la columna de la izquierda para ver sus opciones aquí.</div>
+          </div>
 
-        <div class="sb-mod" data-mod="clientes">
-          <div class="sb-section">👥 Clientes</div>
-          <button class="sb-item" data-nav="clientes" onclick="navTo('clientes')"><span class="ic">📂</span> Ver todos</button>
-          <button class="sb-item sub" onclick="openNuevoClienteModal()"><span class="ic">➕</span> Nuevo cliente</button>
-        </div>
+          <div class="sb-group" data-group="captacion">
+            <div class="sb-mod" data-mod="captacion">
+              <div class="sb-section">🎯 Captación activa</div>
+              <button class="sb-item" data-nav="captacion" onclick="navTo('captacion')"><span class="ic">🔍</span> Buscar mercado</button>
+              <button class="sb-item" data-nav="prospectos" onclick="navTo('prospectos')"><span class="ic">📋</span> Prospectos <span class="sb-badge" id="sb-prosp" style="display:none">0</span></button>
+              <div class="sb-section">📥 Prospección / Importar</div>
+              <button class="sb-item sub" onclick="openImportarModal()"><span class="ic">⬆️</span> Importar lista <span class="add">＋</span></button>
+            </div>
+          </div>
 
-        <div class="sb-mod" data-mod="investigacion">
-          <div class="sb-section">🔬 Investigación</div>
-          <button class="sb-item" data-nav="investigacion" onclick="navTo('investigacion')"><span class="ic">📂</span> Ver todo</button>
-          <button class="sb-item sub" onclick="launchAction('inv_hacer')"><span class="ic">✍️</span> Hacer <span class="add">＋</span></button>
-          <button class="sb-item sub" onclick="launchAction('inv_revisar')"><span class="ic">🔍</span> Revisar <span class="add">＋</span></button>
-        </div>
+          <div class="sb-group" data-group="clientes">
+            <div class="sb-mod" data-mod="clientes">
+              <div class="sb-section">👥 Clientes</div>
+              <button class="sb-item" data-nav="clientes" onclick="navTo('clientes')"><span class="ic">📂</span> Ver todos</button>
+              <button class="sb-item sub" onclick="openNuevoClienteModal()"><span class="ic">➕</span> Nuevo cliente</button>
+            </div>
+          </div>
 
-        <div class="sb-mod" data-mod="proyectos">
-          <div class="sb-section">📊 Proyectos</div>
-          <button class="sb-item" data-nav="proyectos" onclick="navTo('proyectos')"><span class="ic">📂</span> Ver todo</button>
-          <button class="sb-item sub" onclick="launchAction('proj_buscar')"><span class="ic">🌐</span> Buscar proyectos <span class="add">＋</span></button>
-          <button class="sb-item sub" onclick="launchAction('proj_enlaces')"><span class="ic">🔗</span> Subir enlaces <span class="add">＋</span></button>
-          <button class="sb-item sub" onclick="launchAction('proj_docs')"><span class="ic">📄</span> Documentos <span class="add">＋</span></button>
-        </div>
+          <div class="sb-group" data-group="investigacion">
+            <div class="sb-mod" data-mod="investigacion">
+              <div class="sb-section">🔬 Investigación</div>
+              <button class="sb-item" data-nav="investigacion" onclick="navTo('investigacion')"><span class="ic">📂</span> Ver todo</button>
+              <button class="sb-item sub" onclick="launchAction('inv_hacer')"><span class="ic">✍️</span> Hacer <span class="add">＋</span></button>
+              <button class="sb-item sub" onclick="launchAction('inv_revisar')"><span class="ic">🔍</span> Revisar <span class="add">＋</span></button>
+            </div>
+          </div>
 
-        <div class="sb-mod" data-mod="oficios">
-          <div class="sb-section">📝 Oficios y Peticiones</div>
-          <button class="sb-item" data-nav="oficios" onclick="navTo('oficios')"><span class="ic">📂</span> Ver todo</button>
-          <button class="sb-item sub" onclick="openOficioModal()"><span class="ic">✉️</span> Nuevo oficio <span class="add">＋</span></button>
-        </div>
+          <div class="sb-group" data-group="proyectos">
+            <div class="sb-mod" data-mod="proyectos">
+              <div class="sb-section">📊 Proyectos</div>
+              <button class="sb-item" data-nav="proyectos" onclick="navTo('proyectos')"><span class="ic">📂</span> Ver todo</button>
+              <button class="sb-item sub" onclick="launchAction('proj_buscar')"><span class="ic">🌐</span> Buscar proyectos <span class="add">＋</span></button>
+              <button class="sb-item sub" onclick="launchAction('proj_enlaces')"><span class="ic">🔗</span> Subir enlaces <span class="add">＋</span></button>
+              <button class="sb-item sub" onclick="launchAction('proj_docs')"><span class="ic">📄</span> Documentos <span class="add">＋</span></button>
+            </div>
+          </div>
 
-        <div class="sb-section">Estado</div>
-        <button class="sb-item" data-nav="incon" onclick="navTo('incon')"><span class="ic">⏳</span> Inconclusos <span class="sb-badge" id="sb-incon" style="display:none">0</span></button>
+          <div class="sb-group" data-group="oficios">
+            <div class="sb-mod" data-mod="oficios">
+              <div class="sb-section">📝 Oficios y Peticiones</div>
+              <button class="sb-item" data-nav="oficios" onclick="navTo('oficios')"><span class="ic">📂</span> Ver todo</button>
+              <button class="sb-item sub" onclick="openOficioModal()"><span class="ic">✉️</span> Nuevo oficio <span class="add">＋</span></button>
+            </div>
+          </div>
 
-        <div class="sb-section" id="sb-admin-sec" style="display:none">Administración</div>
-        <button class="sb-item" id="sb-users-btn" style="display:none" onclick="openUsersModal()"><span class="ic">👥</span> Usuarios <span class="sb-badge" id="sb-pending" style="display:none">0</span></button>
-        <button class="sb-item" id="sb-saldos-btn" style="display:none" onclick="openProvidersModal()"><span class="ic">💳</span> Saldos API</button>
-      </nav>
-      <div class="sb-foot">
-        <div class="sb-user">
-          <div class="av" id="sb-avatar">U</div>
-          <div class="meta">
-            <div class="n" id="sb-name">Usuario</div>
-            <div class="s">Sesión activa</div>
+          <div class="sb-group" data-group="estado">
+            <div class="sb-section">Estado</div>
+            <button class="sb-item" data-nav="incon" onclick="navTo('incon')"><span class="ic">⏳</span> Inconclusos <span class="sb-badge" id="sb-incon" style="display:none">0</span></button>
+          </div>
+
+          <div class="sb-group" data-group="admin">
+            <div class="sb-section" id="sb-admin-sec" style="display:none">Administración</div>
+            <button class="sb-item" id="sb-users-btn" style="display:none" onclick="openUsersModal()"><span class="ic">👥</span> Usuarios <span class="sb-badge" id="sb-pending" style="display:none">0</span></button>
+            <button class="sb-item" id="sb-saldos-btn" style="display:none" onclick="openProvidersModal()"><span class="ic">💳</span> Saldos API</button>
           </div>
         </div>
-        <button class="btn subtle btn-sm btn-block" style="margin-bottom:6px" onclick="openBioModal()">🔐 Autenticación biométrica</button>
-        <button class="btn subtle btn-sm btn-block" onclick="lockNow()">🔒 Bloquear / salir</button>
+
+        <div class="sb-panel-foot">
+          <div class="sb-foot" style="border-top:0; padding:0 0 10px">
+            <div class="sb-user">
+              <div class="av" id="sb-avatar">U</div>
+              <div class="meta">
+                <div class="n" id="sb-name">Usuario</div>
+                <div class="s">Sesión activa</div>
+              </div>
+            </div>
+            <button class="btn subtle btn-sm btn-block" style="margin-bottom:6px" onclick="openBioModal()">🔐 Autenticación biométrica</button>
+            <button class="btn subtle btn-sm btn-block" onclick="lockNow()">🔒 Bloquear / salir</button>
+          </div>
+          <div class="sb-credit">Desarrollado por<br><span style="color:#475569">Marco Antonio Posligua San Martín</span></div>
+        </div>
       </div>
-      <div class="sb-credit">Desarrollado por<br><span style="color:#475569">Marco Antonio Posligua San Martín</span></div>
     </aside>
 
     <!-- Content -->
@@ -1779,6 +1850,7 @@
       $("sb-admin-sec").style.display = isAdmin ? "" : "none";
       $("sb-users-btn").style.display = isAdmin ? "" : "none";
       $("sb-saldos-btn").style.display = isAdmin ? "" : "none";
+      $("rail-admin").style.display = isAdmin ? "" : "none";  // módulo Admin en el riel
       setupRoleSwitch();
       await loadDocTypes();
       initDropzone();
@@ -1845,6 +1917,10 @@
       });
       const na = $("sb-no-access");
       if (na) na.style.display = (!isAdmin && userModules.length === 0) ? "" : "none";
+      // Si el módulo abierto en el riel dejó de estar disponible (cambio de rol o
+      // permisos revocados), vuelve a Inicio en vez de quedar con el panel vacío.
+      const cur = document.querySelector(`#sb-rail-nav .rail-item[data-rail="${railGroup}"]`);
+      if (cur && cur.style.display === "none") selectRail("all");
     }
 
     function lockNow() {
@@ -1887,8 +1963,10 @@
     async function refreshPendingBadge() {
       try {
         const r = await api("/users?status=pending"); const u = await r.json();
-        const b = $("sb-pending");
+        const b = $("sb-pending"), rb = $("rail-pending");
         if (u.length) { b.style.display = ""; b.textContent = u.length; } else b.style.display = "none";
+        // Espejo en el riel: el contador debe verse aunque el panel muestre otro módulo.
+        if (rb) { if (u.length) { rb.style.display = ""; rb.textContent = u.length; } else rb.style.display = "none"; }
       } catch {}
     }
     async function openProvidersModal() {
@@ -1987,10 +2065,54 @@
       captacion:"🎯 Captación activa", prospectos:"📋 Prospectos", clientes:"👥 Clientes"
     };
     const _CRM_VIEWS = ["captacion","prospectos","clientes","oficios"];
+
+    /* ── Barra lateral de DOS COLUMNAS: riel de módulos + panel de submenús ──
+       Columna 1 (riel) elige el módulo; columna 2 despliega SUS submenús. */
+    const RAIL_TITLES = {
+      all:"Inicio", captacion:"🎯 Captación", clientes:"👥 Clientes",
+      investigacion:"🔬 Investigación", proyectos:"📊 Proyectos",
+      oficios:"📝 Oficios", estado:"⏳ Estado", admin:"⚙️ Administración"
+    };
+    // Vista → grupo del panel, para que el riel siga sincronizado cuando se
+    // navega desde otro sitio (banner de inconclusos, atajos, etc.).
+    const NAV_TO_RAIL = {
+      all:"all", captacion:"captacion", prospectos:"captacion", clientes:"clientes",
+      investigacion:"investigacion", proyectos:"proyectos", oficios:"oficios", incon:"estado"
+    };
+    // Vista por defecto al elegir un módulo en el riel ("admin" no navega: solo abre modales).
+    const RAIL_DEFAULT_NAV = {
+      all:"all", captacion:"captacion", clientes:"clientes", investigacion:"investigacion",
+      proyectos:"proyectos", oficios:"oficios", estado:"incon"
+    };
+    let railGroup = "all";
+
+    /** Despliega en la columna 2 los submenús del módulo y lo marca en el riel. */
+    function selectRail(group) {
+      if (!group) group = "all";
+      railGroup = group;
+      document.querySelectorAll("#sb-rail-nav .rail-item").forEach(b =>
+        b.classList.toggle("active", b.dataset.rail === group));
+      document.querySelectorAll("#sb-nav .sb-group").forEach(g =>
+        g.classList.toggle("show", g.dataset.group === group));
+      const t = $("sb-panel-title");
+      if (t) t.textContent = RAIL_TITLES[group] || "Inicio";
+    }
+
+    /** Clic en el riel: muestra sus submenús y abre la vista principal del módulo. */
+    function railTo(group) {
+      selectRail(group);
+      // En móvil la barra es un cajón: al tocar un módulo se muestran sus submenús
+      // sin navegar aún (navTo cerraría el cajón y no se alcanzarían a ver).
+      if (window.innerWidth <= 860) return;
+      const target = RAIL_DEFAULT_NAV[group];
+      if (target) navTo(target);
+    }
+
     function navTo(target) {
       navModule = target;
       $("sb-nav").querySelectorAll(".sb-item[data-nav]").forEach(b =>
         b.classList.toggle("active", b.dataset.nav === target));
+      selectRail(NAV_TO_RAIL[target] || railGroup);
       $("page-title").textContent = PAGE_TITLES[target] || "Inicio";
       $("app").classList.remove("sb-open");
       // Ocultar todas las vistas CRM y el main
@@ -2389,9 +2511,14 @@
     }
     function renderIncon(rows) {
       const inc = rows.filter(r => isIncon(r.status));
-      const badge = $("sb-incon");
+      const badge = $("sb-incon"), rbadge = $("rail-incon");
       if (inc.length) { badge.style.display = ""; badge.textContent = inc.length; }
       else badge.style.display = "none";
+      // Espejo en el riel: el contador debe verse aunque el panel muestre otro módulo.
+      if (rbadge) {
+        if (inc.length) { rbadge.style.display = ""; rbadge.textContent = inc.length; }
+        else rbadge.style.display = "none";
+      }
 
       const banner = $("incon-banner");
       if (!inc.length || navModule === "incon") { banner.innerHTML = ""; return; }
