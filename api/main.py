@@ -27,6 +27,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
+import httpx  # dependencia transitiva del SDK de Supabase; para detectar cortes de red
 from fastapi import (
     BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile,
 )
@@ -239,6 +240,16 @@ def _db(fn, *args, **kwargs):
         raise
     except Exception as e:  # noqa: BLE001
         msg = str(e)
+        # Corte de red / DNS / origen caído: NO es un error de la aplicación ni un
+        # esquema mal aplicado. Antes se filtraba crudo al usuario como
+        # "Error de base de datos: ConnectError: [Errno -2] Name or service not
+        # known". Se responde 503 (temporal, reintentable) con un mensaje accionable.
+        if isinstance(e, httpx.TransportError) or type(e).__name__ in (
+                "ConnectError", "ConnectTimeout", "ReadTimeout", "RemoteProtocolError"):
+            raise HTTPException(
+                503, "La base de datos no está disponible en este momento (fallo de "
+                     "conexión con Supabase). Reintenta en unos segundos; si persiste, "
+                     "revisa el estado del proyecto en el panel de Supabase.")
         if "user_module_roles" in msg and ("does not exist" in msg or "schema cache" in msg or "relation" in msg):
             raise HTTPException(500, "La tabla de roles por módulo no existe. Aplica la migración "
                                      "db/010_module_roles.sql en Supabase (SQL Editor).")

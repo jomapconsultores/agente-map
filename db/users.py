@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import config
-from utils.supabase_client import get_client
+from utils.supabase_client import get_client, run_with_retry
 
 
 class UsersError(RuntimeError):
@@ -24,22 +24,31 @@ def _sb():
     return get_client(service_role=True)
 
 
+# Todas las operaciones van envueltas en run_with_retry: este módulo está en la
+# ruta de AUTENTICACIÓN (login, revalidación de sesión en cada request), y era el
+# único que no reintentaba. Un parpadeo transitorio de Supabase (ConnectError /
+# RemoteProtocolError sobre una conexión keep-alive muerta) tumbaba el login con
+# un 500 crudo "Error de base de datos: ConnectError…". run_with_retry recrea el
+# pool y reintenta; los errores que NO son de transporte (4xx de PostgREST) se
+# propagan igual que antes, sin reintentar.
 _PUBLIC_COLS = "id, email, name, role, status, created_at, last_login_at"
 
 
 def count_users() -> int:
-    res = _sb().table("users").select("id", count="exact").execute()
+    res = run_with_retry(lambda: _sb().table("users").select("id", count="exact").execute())
     return res.count or 0
 
 
 def get_by_email(email: str) -> Optional[dict[str, Any]]:
     email = (email or "").strip().lower()
-    res = _sb().table("users").select("*").eq("email", email).limit(1).execute()
+    res = run_with_retry(
+        lambda: _sb().table("users").select("*").eq("email", email).limit(1).execute())
     return (res.data or [None])[0]
 
 
 def get_by_id(user_id: str) -> Optional[dict[str, Any]]:
-    res = _sb().table("users").select("*").eq("id", user_id).limit(1).execute()
+    res = run_with_retry(
+        lambda: _sb().table("users").select("*").eq("id", user_id).limit(1).execute())
     return (res.data or [None])[0]
 
 
@@ -53,30 +62,35 @@ def create_user(*, email: str, name: str, password_hash: str, password_salt: str
         "role": role,
         "status": status,
     }
-    res = _sb().table("users").insert(row).execute()
+    res = run_with_retry(lambda: _sb().table("users").insert(row).execute())
     if not res.data:
         raise UsersError("insert users devolvió data vacía")
     return res.data[0]
 
 
 def list_users(status: Optional[str] = None) -> list[dict[str, Any]]:
-    q = _sb().table("users").select(_PUBLIC_COLS).order("created_at", desc=True)
-    if status:
-        q = q.eq("status", status)
-    return q.execute().data or []
+    def _q():
+        q = _sb().table("users").select(_PUBLIC_COLS).order("created_at", desc=True)
+        if status:
+            q = q.eq("status", status)
+        return q.execute()
+    return run_with_retry(_q).data or []
 
 
 def set_status(user_id: str, status: str) -> None:
-    _sb().table("users").update({"status": status}).eq("id", user_id).execute()
+    run_with_retry(
+        lambda: _sb().table("users").update({"status": status}).eq("id", user_id).execute())
 
 
 def set_role(user_id: str, role: str) -> None:
-    _sb().table("users").update({"role": role}).eq("id", user_id).execute()
+    run_with_retry(
+        lambda: _sb().table("users").update({"role": role}).eq("id", user_id).execute())
 
 
 def touch_login(user_id: str) -> None:
     try:
-        _sb().table("users").update({"last_login_at": "now()"}).eq("id", user_id).execute()
+        run_with_retry(lambda: _sb().table("users")
+                       .update({"last_login_at": "now()"}).eq("id", user_id).execute())
     except Exception:
         pass
 
