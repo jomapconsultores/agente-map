@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """Persistencia de usuarios en Supabase (tabla public.users).
 
 Usa la clave service_role (salta RLS). Las contraseñas se guardan ya hasheadas

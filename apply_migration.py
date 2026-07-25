@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """Aplica migraciones via psycopg2 - intenta varios hosts/metodos."""
 import sys
 sys.stdout.reconfigure(encoding='utf-8')

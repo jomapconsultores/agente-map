@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """Persistencia de oficios/peticiones en Supabase."""
 from __future__ import annotations
 

@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """
 AGENTE OFICIO — Redactor de oficios, peticiones y recursos administrativos
 ──────────────────────────────────────────────────────────────────────────

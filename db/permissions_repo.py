@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """Roles por módulo (public.user_module_roles): qué áreas — captación,
 clientes, investigación, proyectos, oficios — puede operar cada usuario,
 además de su rol admin/user. Solo el administrador otorga o revoca estos

@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """
 AGENTE CAPTACIÓN ACTIVA — Búsqueda de mercado por producto/servicio
 ────────────────────────────────────────────────────────────────────

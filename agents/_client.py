@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """Cliente Anthropic compartido con políticas de retry para tier free/bajo.
 
 Los agentes hacen llamadas grandes (8–16 k tokens) muy seguidas; en planes con

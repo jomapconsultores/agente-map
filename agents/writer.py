@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """
 AGENTE 2 — REDACTOR / EDITORIALISTA EXPERTO MULTIDISCIPLINARIO
 Produce CUALQUIER tipo de entregable de alto nivel (propuesta, artículo científico,

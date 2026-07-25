@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """
 SCOUT — DETECCIÓN DE OPORTUNIDADES (reporte con calificación ponderada)
 ────────────────────────────────────────────────────────────────────────

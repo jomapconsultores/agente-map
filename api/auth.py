@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """Autenticación propia (sin dependencias externas).
 
 - Contraseñas: PBKDF2-HMAC-SHA256 con salt aleatorio por usuario.

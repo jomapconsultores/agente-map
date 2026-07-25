@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """
 AGENTE 1 — ANALISTA DE VIABILIDAD Y BUSCADOR DE OPORTUNIDADES
 Experto senior en financiamiento internacional para Ecuador.

@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """Pipeline por FASES con gates ≥90 revisados por IAs distintas y reinicio al inicio.
 
 Flujo (cada fase la produce una IA y la audita OTRA; si un gate da <90 se vuelve al

@@ -1,3 +1,4 @@
+/* Desarrollado por Marco Antonio Posligua San Martín */
 /* Service Worker — Proyectos MAP */
 const CACHE = 'map-pwa-v1';
 const STATIC = ['/', '/manifest.json', '/icon.svg'];

@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """Despacho de trabajos largos del pipeline.
 
 Dos modos, seleccionados por la variable de entorno ``REDIS_URL``:

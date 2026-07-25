@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """Lectura de sesiones guardadas en Supabase.
 
 Cierra el bucle de persistencia: el agente las inserta vía repository.py,

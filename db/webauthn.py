@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """Persistencia de credenciales WebAuthn (passkeys/biometría) en Supabase.
 
 Tabla webauthn_credentials:

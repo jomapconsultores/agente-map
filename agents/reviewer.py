@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """
 AGENTE 3 — REVISOR Y CONTROLADOR DE CALIDAD (multi-formato)
 Evalúa CUALQUIER tipo de entregable con máximo rigor, usando los criterios propios del

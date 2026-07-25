@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """Persistencia de prospectos y clientes en Supabase."""
 from __future__ import annotations
 

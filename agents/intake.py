@@ -1,3 +1,6 @@
+# ------------------------------------------------------------
+# Desarrollado por Marco Antonio Posligua San Martín
+# ------------------------------------------------------------
 """
 AGENTE INTAKE — Análisis profundo de documentos de entrada
 ──────────────────────────────────────────────────────────
