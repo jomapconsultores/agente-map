@@ -101,4 +101,64 @@ def touch_login(user_id: str) -> None:
 def public_view(u: dict[str, Any]) -> dict[str, Any]:
     """Quita campos sensibles antes de devolver al cliente."""
     return {k: u.get(k) for k in ("id", "email", "name", "role", "status",
-                                  "created_at", "last_login_at")}
+                                  "created_at", "last_login_at",
+                                  "phone", "position", "must_change_password")}
+
+
+# ── Módulo de cuenta ─────────────────────────────────────────────────────────
+# Los campos nuevos viven en db/014_cuenta_autoservicio.sql. Todo lo que los
+# usa lo hace con .get(...) para que la API siga arrancando si la migración
+# todavía no se aplicó.
+
+def update_profile(user_id: str, *, name: Optional[str] = None,
+                   email: Optional[str] = None, phone: Optional[str] = None,
+                   position: Optional[str] = None) -> dict[str, Any]:
+    """Actualiza los datos que el propio usuario mantiene."""
+    row: dict[str, Any] = {}
+    if name is not None:
+        row["name"] = name.strip()
+    if email is not None:
+        row["email"] = email.strip().lower()
+    if phone is not None:
+        row["phone"] = phone.strip()
+    if position is not None:
+        row["position"] = position.strip()
+    if not row:
+        return get_by_id(user_id) or {}
+    res = run_with_retry(
+        lambda: _sb().table("users").update(row).eq("id", user_id).execute())
+    if not res.data:
+        raise UsersError("update users devolvió data vacía")
+    return res.data[0]
+
+
+def set_password(user_id: str, *, password_hash: str, password_salt: str,
+                 must_change: bool = False,
+                 temp_expires: Optional[str] = None,
+                 reset_by: Optional[str] = None) -> None:
+    """Escribe una contraseña nueva. `must_change=True` marca la clave como
+    temporal: la API obliga a cambiarla antes de dejar operar."""
+    row: dict[str, Any] = {
+        "password_hash": password_hash,
+        "password_salt": password_salt,
+        "must_change_password": must_change,
+        "temp_password_expires": temp_expires,
+        "password_updated_at": "now()",
+    }
+    if reset_by:
+        row["password_reset_by"] = reset_by
+    run_with_retry(
+        lambda: _sb().table("users").update(row).eq("id", user_id).execute())
+
+
+def log_password(user_id: str, action: str, executed_by: Optional[str] = None,
+                 ip: str = "") -> None:
+    """Bitácora de cambios de clave. Nunca guarda la clave, solo el hecho."""
+    try:
+        run_with_retry(lambda: _sb().table("password_log").insert({
+            "user_id": user_id, "action": action,
+            "executed_by": executed_by, "ip": ip,
+        }).execute())
+    except Exception:  # noqa: BLE001
+        # Auxiliar: si la tabla aún no está migrada no debe frenar el cambio.
+        pass

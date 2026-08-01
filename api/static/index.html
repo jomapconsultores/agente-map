@@ -710,6 +710,15 @@
 
         <div class="lock-msg" id="lock-msg"></div>
         <div class="lock-hint">
+          <a href="#" onclick="var o=document.getElementById('olvide-clave');o.style.display=o.style.display==='none'?'block':'none';return false">¿Olvidaste tu clave?</a>
+        </div>
+        <div id="olvide-clave" style="display:none;font-size:12px;line-height:1.5;text-align:left;
+             background:rgba(0,0,0,.04);border-radius:10px;padding:10px 12px;margin-top:8px">
+          Por seguridad no se envían claves por correo. Pide al <b>administrador</b> que entre en
+          <i>Usuarios</i> y use <i>Restablecer clave</i>: te entregará una clave temporal de un solo
+          uso, válida 72 horas, que deberás cambiar apenas ingreses.
+        </div>
+        <div class="lock-hint">
           <a href="#" onclick="masterLogin();return false">Acceso de administrador con clave maestra</a>
         </div>
       </div>
@@ -820,6 +829,7 @@
                 <div class="s">Sesión activa</div>
               </div>
             </div>
+            <button class="btn subtle btn-sm btn-block" style="margin-bottom:4px" onclick="openAccountModal()">👤 Mi cuenta y clave</button>
             <button class="btn subtle btn-sm btn-block" style="margin-bottom:4px" onclick="openBioModal()">🔐 Autenticación biométrica</button>
             <button class="btn subtle btn-sm btn-block" onclick="lockNow()">🔒 Bloquear / salir</button>
           </div>
@@ -1163,6 +1173,74 @@
         </div>
         <div id="nt-msg" class="muted" style="font-size:12px;min-height:16px;color:var(--err)"></div>
         <button id="nt-submit-btn" class="btn gold btn-block" onclick="submitNuevoTrabajador()">Crear trabajador</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: clave temporal generada por el administrador (se muestra una sola vez) -->
+  <div class="modal-backdrop" id="temp-pass-modal" onclick="if(event.target===this)this.classList.remove('show')">
+    <div class="modal" style="max-width:440px">
+      <div class="modal-header">
+        <h2>🔑 Clave temporal</h2>
+        <button class="btn ghost btn-sm" onclick="document.getElementById('temp-pass-modal').classList.remove('show')">✕</button>
+      </div>
+      <div class="modal-body" style="padding:18px 22px 22px;display:flex;flex-direction:column;gap:12px">
+        <p class="muted" style="font-size:12px;margin:0">
+          Clave temporal para <b id="temp-pass-user"></b>. Entrégasela en persona:
+          <b>no se volverá a mostrar</b>, caduca en 72 horas y deberá cambiarla al entrar.
+        </p>
+        <div id="temp-pass-value" style="font-family:ui-monospace,monospace;font-size:22px;
+             letter-spacing:2px;text-align:center;padding:14px;border:1px dashed var(--line);
+             border-radius:10px;user-select:all"></div>
+        <button class="btn gold btn-block" onclick="copiarClaveTemporal()">Copiar al portapapeles</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: mi cuenta (datos propios y cambio de clave) -->
+  <div class="modal-backdrop" id="account-modal" onclick="if(event.target===this)this.classList.remove('show')">
+    <div class="modal" style="max-width:480px">
+      <div class="modal-header">
+        <h2>👤 Mi cuenta</h2>
+        <button class="btn ghost btn-sm" onclick="document.getElementById('account-modal').classList.remove('show')">✕</button>
+      </div>
+      <div class="modal-body" style="padding:18px 22px 22px;display:flex;flex-direction:column;gap:12px">
+        <div>
+          <label class="field-label">Nombre</label>
+          <input id="acc-name" type="text" style="width:100%">
+        </div>
+        <div style="display:flex;gap:10px">
+          <div style="flex:1"><label class="field-label">Teléfono</label>
+            <input id="acc-phone" type="tel" placeholder="09XXXXXXXX" style="width:100%"></div>
+          <div style="flex:1"><label class="field-label">Cargo</label>
+            <input id="acc-position" type="text" style="width:100%"></div>
+        </div>
+        <div>
+          <label class="field-label">Email de acceso</label>
+          <input id="acc-email" type="email" style="width:100%">
+          <div class="muted" style="font-size:11.5px;margin-top:4px">
+            Es tu usuario para entrar. Si lo cambias, confirma tu clave actual abajo.</div>
+        </div>
+        <div>
+          <label class="field-label">Clave actual (solo si cambias el email)</label>
+          <input id="acc-current-for-email" type="password" autocomplete="current-password" style="width:100%">
+        </div>
+        <div id="acc-msg" class="muted" style="font-size:12px;min-height:14px;color:var(--err)"></div>
+        <button class="btn gold btn-block" onclick="saveAccountProfile()">Guardar mis datos</button>
+
+        <hr style="border:none;border-top:1px solid var(--line);margin:6px 0">
+        <div style="font-weight:600">🔑 Cambiar mi clave</div>
+        <p class="muted" style="font-size:11.5px;margin:0">
+          Necesitas escribir la clave actual. Si la olvidaste, pide al administrador que la
+          restablezca: te entregará una clave temporal de un solo uso.
+        </p>
+        <div><label class="field-label">Clave actual</label>
+          <input id="acc-current" type="password" autocomplete="current-password" style="width:100%"></div>
+        <div><label class="field-label">Nueva clave (mínimo 8 caracteres)</label>
+          <input id="acc-new" type="password" autocomplete="new-password" style="width:100%"></div>
+        <div><label class="field-label">Repetir nueva clave</label>
+          <input id="acc-new2" type="password" autocomplete="new-password" style="width:100%"></div>
+        <button class="btn btn-block" onclick="saveAccountPassword()">Guardar nueva clave</button>
       </div>
     </div>
   </div>
@@ -1721,6 +1799,13 @@
           localStorage.removeItem(TOKEN_LS); localStorage.removeItem(USER_LS);
         }
         await doUnlock();
+        /* Clave temporal del administrador: la API bloquea todo lo demás hasta
+           que el usuario defina la suya, así que lo llevamos directo ahí. */
+        if (j.must_change_password) {
+          openAccountModal();
+          toast("Tu clave fue restablecida por el administrador. Define una nueva para continuar.", "err");
+          return;
+        }
         /* Offer bio setup if not yet registered and device supports it */
         const creds = waGetCreds();
         if (remember && bioOkCache && creds.length === 0) setTimeout(offerBiometricSetup, 800);
@@ -1940,6 +2025,12 @@
       $("role-switch").style.display = "none";
       localStorage.removeItem(TOKEN_LS); localStorage.removeItem(MASTER_LS);
       if (pollTimer) clearTimeout(pollTimer);
+      // Borrar el token no basta: hay que vaciar también lo que el service
+      // worker haya guardado, o en un equipo compartido quedaría recuperable
+      // sin conexión después de cerrar sesión.
+      if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ tipo: "LIMPIAR" });
+      }
       $("app").hidden = true; $("lock").hidden = false;
       lockMsg("Sesión cerrada.", "ok"); initLock();
     }
@@ -2022,10 +2113,16 @@
         trabajador: [["make-user", "Hacer usuario"], ["make-admin", "Hacer admin"]],
         user:       [["make-trabajador", "Hacer trabajador"], ["make-admin", "Hacer admin"]],
       }[u.role] || [];
-      const actions = u.status==="pending"
+      // Recuperación de clave olvidada: genera una clave temporal de un solo uso.
+      const resetBtn = u.status === "approved"
+        ? ` <button class="btn subtle btn-sm" title="Olvidó su clave" onclick="resetUserPassword('${u.id}','${esc(u.name||u.email).replace(/'/g,"\\'")}')">🔑 Restablecer clave</button>`
+        : "";
+      const tempPill = u.must_change_password
+        ? ' <span class="pill pending" title="Tiene una clave temporal sin cambiar">temporal</span>' : "";
+      const actions = (u.status==="pending"
         ? `<button class="btn btn-sm" onclick="userAction('${u.id}','approve')">Aprobar</button> <button class="btn subtle btn-sm" onclick="userAction('${u.id}','reject')">Rechazar</button>`
         : roleActions.map(([action, label]) =>
-            `<button class="btn subtle btn-sm" onclick="userAction('${u.id}','${action}')">${label}</button>`).join(" ");
+            `<button class="btn subtle btn-sm" onclick="userAction('${u.id}','${action}')">${label}</button>`).join(" ")) + resetBtn;
       const roleChips = u.role === "admin"
         ? '<div class="muted" style="font-size:11.5px;margin-top:6px">Administrador: acceso a todos los módulos.</div>'
         : `<div class="role-chips">${ALL_MODULES.map(m => `
@@ -2036,7 +2133,7 @@
       return `<div style="padding:11px 0;border-bottom:1px solid var(--line)">
         <div style="display:flex;align-items:center;gap:10px">
         <div style="flex:1;min-width:0"><div style="font-weight:600">${esc(u.name||"(sin nombre)")} ${role}</div>
-        <div class="muted" style="font-size:12px">${esc(u.email)} · ${st}</div></div>
+        <div class="muted" style="font-size:12px">${esc(u.email)} · ${st}${tempPill}</div></div>
         <div style="display:flex;gap:6px;flex-shrink:0">${actions}</div></div>
         ${roleChips}</div>`;
     }
@@ -2049,6 +2146,64 @@
         if (isOn) await api(`/users/${userId}/roles/${module}`, { method:"DELETE" });
         else await api(`/users/${userId}/roles`, { method:"POST", body: JSON.stringify({ module }) });
         openUsersModal();
+      } catch (e) { toast(e.message, "err"); }
+    }
+
+    /* ════════ Recuperación de clave (reseteo administrativo) ════════ */
+    async function resetUserPassword(userId, nombre) {
+      if (!confirm(`¿Restablecer la clave de ${nombre}?\n\nSe generará una clave temporal de un solo uso que deberás entregarle en persona. Su clave actual dejará de funcionar.`)) return;
+      try {
+        const r = await api(`/users/${userId}/reset-password`, { method: "POST" });
+        const d = await r.json();
+        // Se muestra UNA sola vez: no queda almacenada en claro en ninguna parte.
+        $("temp-pass-user").textContent = nombre;
+        $("temp-pass-value").textContent = d.temporary_password;
+        $("temp-pass-modal").classList.add("show");
+        openUsersModal();
+      } catch (e) { toast(e.message, "err"); }
+    }
+    function copiarClaveTemporal() {
+      const v = $("temp-pass-value").textContent;
+      navigator.clipboard.writeText(v).then(() => toast("Clave copiada al portapapeles.", "ok"),
+                                            () => toast("Copia la clave manualmente.", "err"));
+    }
+
+    /* ════════ Mi cuenta: datos y clave propia ════════ */
+    async function openAccountModal() {
+      $("account-modal").classList.add("show");
+      $("acc-msg").textContent = "";
+      try {
+        const r = await api("/auth/me"); const u = await r.json();
+        $("acc-name").value = u.name || "";
+        $("acc-email").value = u.email || "";
+        $("acc-phone").value = u.phone || "";
+        $("acc-position").value = u.position || "";
+      } catch (e) { $("acc-msg").textContent = e.message; }
+    }
+    async function saveAccountProfile() {
+      try {
+        await api("/auth/profile", { method: "PUT", body: JSON.stringify({
+          name: $("acc-name").value.trim(),
+          email: $("acc-email").value.trim(),
+          phone: $("acc-phone").value.trim(),
+          position: $("acc-position").value.trim(),
+          current_password: $("acc-current-for-email").value,
+        })});
+        $("acc-current-for-email").value = "";
+        toast("Datos actualizados.", "ok");
+      } catch (e) { toast(e.message, "err"); }
+    }
+    async function saveAccountPassword() {
+      const nueva = $("acc-new").value, rep = $("acc-new2").value;
+      if (nueva.length < 8) { toast("La nueva clave debe tener al menos 8 caracteres.", "err"); return; }
+      if (nueva !== rep)    { toast("La nueva clave y su confirmación no coinciden.", "err"); return; }
+      try {
+        await api("/auth/password", { method: "POST", body: JSON.stringify({
+          current_password: $("acc-current").value, new_password: nueva,
+        })});
+        $("acc-current").value = $("acc-new").value = $("acc-new2").value = "";
+        toast("Clave actualizada correctamente.", "ok");
+        $("account-modal").classList.remove("show");
       } catch (e) { toast(e.message, "err"); }
     }
 

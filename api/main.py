@@ -165,7 +165,13 @@ def _load_modules(role: str, user_id: Optional[str]) -> list[str]:
         return []
 
 
-def get_principal(authorization: Optional[str] = Header(None),
+# Rutas que un usuario con clave temporal SÍ puede usar (si no, quedaría
+# encerrado sin poder ni cambiarla ni consultar su propio estado).
+_RUTAS_LIBRES_CLAVE = frozenset({"/auth/password", "/auth/me"})
+
+
+def get_principal(request: Request = None,
+                  authorization: Optional[str] = Header(None),
                   x_api_key: Optional[str] = Header(None)) -> Principal:
     master = os.getenv(API_KEY_ENV, "")
     if x_api_key and master and hmac.compare_digest(x_api_key, master):
@@ -188,6 +194,14 @@ def get_principal(authorization: Optional[str] = Header(None),
                 if not u or u.get("status") != "approved":
                     raise HTTPException(
                         401, "Sesión inválida: tu cuenta ya no está activa. Inicia sesión de nuevo.")
+                # Clave temporal puesta por el administrador: el usuario no puede
+                # operar hasta definir la suya. Se dejan pasar solo las rutas que
+                # le permiten hacerlo (si no, quedaría encerrado).
+                if u.get("must_change_password") and \
+                        (request is None or request.url.path not in _RUTAS_LIBRES_CLAVE):
+                    raise HTTPException(
+                        403, "Tu clave fue restablecida por el administrador. "
+                             "Define una nueva en POST /auth/password para continuar.")
                 role = u.get("role", "user")
                 return Principal(uid, role, email=u.get("email"), name=u.get("name"),
                                  modules=_load_modules(role, uid))
@@ -272,6 +286,26 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+# ── Módulo de cuenta ─────────────────────────────────────────────────────────
+# Longitud mínima al DEFINIR una clave nueva. El login sigue aceptando las
+# claves cortas ya existentes; solo se exige al cambiarlas.
+MIN_PASSWORD = 8
+
+
+class UpdateProfileRequest(BaseModel):
+    name: str = Field("", max_length=120)
+    phone: str = Field("", max_length=40)
+    position: str = Field("", max_length=120)
+    # Cambiar el email exige confirmar la clave actual (es la credencial de acceso).
+    email: Optional[str] = Field(None, max_length=200)
+    current_password: str = Field("", max_length=200)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., max_length=200)
+    new_password: str = Field(..., min_length=MIN_PASSWORD, max_length=200)
 
 
 class CreateProposalRequest(BaseModel):
@@ -868,11 +902,19 @@ def login(req: LoginRequest):
         raise HTTPException(403, "Tu cuenta está pendiente de aprobación por el administrador.")
     if u.get("status") != "approved":
         raise HTTPException(403, "Tu cuenta no está activa. Contacta al administrador.")
+    # Una clave temporal caducada no sirve: hay que pedir al administrador que la
+    # restablezca de nuevo.
+    if _clave_temporal_vencida(u):
+        raise HTTPException(
+            403, "La clave temporal que te entregó el administrador ya caducó. "
+                 "Pídele que la restablezca nuevamente.")
     users_repo.touch_login(u["id"])
     token = auth_lib.make_token(u["id"], u.get("role", "user"))
     view = users_repo.public_view(u)
     view["modules"] = _load_modules(u.get("role", "user"), u["id"])
-    return {"token": token, "user": view}
+    # El cliente usa este flag para llevar al usuario directo al cambio de clave.
+    return {"token": token, "user": view,
+            "must_change_password": bool(u.get("must_change_password"))}
 
 
 @app.get("/auth/me")
@@ -886,6 +928,91 @@ def me(p: Principal = Depends(get_principal)):
     view = users_repo.public_view(u)
     view["modules"] = _load_modules(u.get("role", "user"), u["id"])
     return view
+
+
+# ── Mi cuenta: autoservicio del propio usuario ───────────────────────────────
+def _client_ip(request: Request) -> str:
+    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return fwd or (request.client.host if request.client else "")
+
+
+def _generar_clave_temporal(largo: int = 12) -> str:
+    """Clave temporal legible: sin caracteres ambiguos (0/O, 1/l/I) para poder
+    dictarla por teléfono sin errores. Aleatoriedad criptográfica."""
+    import secrets
+    alfabeto = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    return "".join(secrets.choice(alfabeto) for _ in range(largo))
+
+
+def _clave_temporal_vencida(u: dict) -> bool:
+    """True si el usuario arrastra una clave temporal ya caducada."""
+    if not u.get("must_change_password"):
+        return False
+    exp = u.get("temp_password_expires")
+    if not exp:
+        return False
+    try:
+        from datetime import datetime, timezone
+        return datetime.fromisoformat(str(exp).replace("Z", "+00:00")) < datetime.now(timezone.utc)
+    except ValueError:
+        return False
+
+
+@app.put("/auth/profile")
+def update_profile(req: UpdateProfileRequest, p: Principal = Depends(get_principal)):
+    """El propio usuario actualiza sus datos. Cambiar el email —que es la
+    credencial de acceso— exige confirmar la clave actual."""
+    _require_supabase()
+    if p.master or not p.user_id:
+        raise HTTPException(400, "La clave maestra no tiene perfil editable.")
+    u = _db(users_repo.get_by_id, p.user_id)
+    if not u:
+        raise HTTPException(401, "Sesión inválida.")
+
+    email_nuevo = None
+    if req.email:
+        candidato = req.email.strip().lower()
+        if candidato != (u.get("email") or "").lower():
+            if "@" not in candidato or "." not in candidato.split("@")[-1]:
+                raise HTTPException(400, "Email inválido.")
+            if not auth_lib.verify_password(req.current_password,
+                                            u.get("password_hash", ""),
+                                            u.get("password_salt", "")):
+                raise HTTPException(403, "Para cambiar el email debes confirmar tu clave actual.")
+            if _db(users_repo.get_by_email, candidato):
+                raise HTTPException(409, "Ya existe una cuenta con ese email.")
+            email_nuevo = candidato
+
+    actualizado = _db(users_repo.update_profile, p.user_id,
+                      name=req.name or None, email=email_nuevo,
+                      phone=req.phone, position=req.position)
+    view = users_repo.public_view(actualizado)
+    view["modules"] = _load_modules(actualizado.get("role", "user"), actualizado["id"])
+    return view
+
+
+@app.post("/auth/password")
+def change_password(req: ChangePasswordRequest, request: Request,
+                    p: Principal = Depends(get_principal)):
+    """Cambio de clave propia: exige la anterior (o la temporal que entregó el
+    administrador). Al guardarla se levanta el bloqueo de clave temporal."""
+    _require_supabase()
+    if p.master or not p.user_id:
+        raise HTTPException(400, "La clave maestra no se cambia desde aquí.")
+    u = _db(users_repo.get_by_id, p.user_id)
+    if not u:
+        raise HTTPException(401, "Sesión inválida.")
+    if not auth_lib.verify_password(req.current_password, u.get("password_hash", ""),
+                                    u.get("password_salt", "")):
+        raise HTTPException(403, "La clave actual no es correcta.")
+    if auth_lib.verify_password(req.new_password, u.get("password_hash", ""),
+                                u.get("password_salt", "")):
+        raise HTTPException(400, "La nueva clave debe ser distinta de la anterior.")
+    h, salt = auth_lib.hash_password(req.new_password)
+    _db(users_repo.set_password, p.user_id, password_hash=h, password_salt=salt,
+        must_change=False, temp_expires=None)
+    users_repo.log_password(p.user_id, "self_change", p.user_id, _client_ip(request))
+    return {"ok": True, "message": "Clave actualizada correctamente."}
 
 
 # ── Gestión de usuarios (solo admin) ─────────────────────────────────────────
@@ -996,6 +1123,35 @@ def create_trabajador(req: CreateWorkerRequest, p: Principal = Depends(get_princ
     u = _db(users_repo.create_user, email=email, name=req.name, password_hash=h,
             password_salt=salt, role="trabajador", status="approved")
     return {"ok": True, "user": users_repo.public_view(u)}
+
+
+@app.post("/users/{user_id}/reset-password")
+def reset_user_password(user_id: str, request: Request,
+                        p: Principal = Depends(get_principal)):
+    """Recuperación de clave olvidada: el administrador genera una clave temporal
+    de un solo uso. Se devuelve UNA vez (no queda almacenada en claro), caduca a
+    las 72 h y el usuario está obligado a cambiarla al entrar. Solo admin."""
+    require_admin(p)
+    _require_supabase()
+    u = _db(users_repo.get_by_id, user_id)
+    if not u:
+        raise HTTPException(404, "Usuario no encontrado.")
+
+    from datetime import datetime, timedelta, timezone
+    temporal = _generar_clave_temporal()
+    h, salt = auth_lib.hash_password(temporal)
+    expira = datetime.now(timezone.utc) + timedelta(hours=72)
+    _db(users_repo.set_password, user_id, password_hash=h, password_salt=salt,
+        must_change=True, temp_expires=expira.isoformat(), reset_by=p.user_id)
+    users_repo.log_password(user_id, "reset_admin", p.user_id, _client_ip(request))
+    return {
+        "ok": True,
+        "temporary_password": temporal,
+        "expires_at": expira.isoformat(),
+        "message": (f"Entrega esta clave temporal a {u.get('name') or u.get('email')} "
+                    f"en persona. Caduca en 72 horas y deberá cambiarla al entrar. "
+                    f"No se volverá a mostrar."),
+    }
 
 
 class GrantModuleRequest(BaseModel):
