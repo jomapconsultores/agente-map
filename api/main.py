@@ -604,10 +604,10 @@ def logo_png():
 def _deployed_commit() -> str:
     """SHA del commit desplegado, para verificar QUÉ código está corriendo en vivo
     (antes /healthz solo daba una versión estática y no permitía confirmar deploys).
-    Coolify/Render exponen el commit como variable de entorno; se prueban los
-    nombres habituales y, si no, se lee git localmente como último recurso."""
+    Coolify expone el commit como variable de entorno; se prueban los nombres
+    habituales y, si no, se lee git localmente como último recurso."""
     for var in ("SOURCE_COMMIT", "GIT_COMMIT", "GIT_SHA", "COMMIT_SHA",
-                "RENDER_GIT_COMMIT", "COOLIFY_GIT_COMMIT", "COOLIFY_GIT_SHA"):
+                "COOLIFY_GIT_COMMIT", "COOLIFY_GIT_SHA"):
         val = os.environ.get(var, "")
         if val:
             return val[:12]

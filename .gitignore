@@ -22,7 +22,7 @@ test_supabase.py
 smoke_save_session.py
 
 # API key local para llamar a la API desplegada
-.api_key_for_render
+.api_key
 
 # IDE
 .vscode/

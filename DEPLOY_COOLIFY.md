@@ -55,7 +55,7 @@ WEBAUTHN_ORIGIN=https://proyectos.pensamiento-libre.org
 ```
 
 > `AGENTE_MAP_API_KEY` es la clave del **panel web** (no la de los modelos).
-> En Coolify la defines tú (a diferencia de Render que la autogeneraba).
+> La defines tú: elige una cadena larga y aleatoria.
 
 ## 3. Dominio + HTTPS
 El dominio público es **`proyectos.pensamiento-libre.org`**. Pasos:

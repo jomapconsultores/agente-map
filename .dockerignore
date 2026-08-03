@@ -2,7 +2,7 @@
 .env
 .env.local
 .env.*.local
-.api_key_for_render
+.api_key
 
 # Git
 .git/
