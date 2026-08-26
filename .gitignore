@@ -36,3 +36,6 @@ Thumbs.db
 
 # editor temp files
 *.tmp.*
+
+# ajustes locales de Claude Code (no son del proyecto)
+.claude/settings.local.json
