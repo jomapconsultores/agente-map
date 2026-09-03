@@ -1,0 +1,14 @@
+# Temas que vigila el buscador de convocatorias, uno por línea.
+# Las líneas vacías y las que empiezan con # se ignoran.
+# Salen de los sectores del perfil maestro (perfil-map/PERFIL_MAP.md, sección 4):
+# edítelos con libertad, son la consulta que se lanza cada semana.
+#
+# Un tema bueno describe QUÉ se quiere financiar, no el nombre de un financiador:
+# el buscador ya recorre BID, CAF, PNUD, UE, GIZ, SERCOP y compras públicas por su
+# cuenta. Cuantos más temas, más tarda y más cuesta cada corrida.
+
+desarrollo económico local y fortalecimiento de MIPYMES
+capacitación y formación profesional
+planificación territorial, urbana y gestión hídrica
+transformación digital e inteligencia artificial aplicada a la gestión pública
+emprendimiento e innovación para mujeres y jóvenes

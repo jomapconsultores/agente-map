@@ -53,6 +53,7 @@ import agents.intake as intake
 from agents.analyst import result_from_data
 from utils.output import save_session
 from utils import empresas as empresas_util
+from utils import perfil as perfil_util
 from db import repository
 
 
@@ -526,8 +527,12 @@ def run_pipeline(
             _stop.set()
         _log(session_id, "fase0_5", "Documentos analizados", "📄", "done")
 
-        # Contexto organizacional (Empresas/) — cargado una sola vez
-        empresas_context = empresas_util.context_block()
+        # Contexto organizacional — cargado una sola vez. Dos bloques con papeles
+        # distintos: el perfil maestro (identidad, entidades, catálogo, diferenciadores
+        # con prueba) y los documentos legales verbatim de Empresas/ (RUC, estatutos, CVs).
+        empresas_context = "\n\n".join(
+            b for b in (perfil_util.block(), empresas_util.context_block()) if b
+        )
 
         approved = False
         # Mejor versión lograda (por si ningún intento alcanza el 90).

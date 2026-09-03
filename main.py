@@ -26,6 +26,7 @@ import agents.reviewer as reviewer
 import agents.financial as financial
 import agents.phase_review as phase_review
 from utils import empresas as empresas_util
+from utils import perfil as perfil_util
 
 
 # ── Startup check ─────────────────────────────────────────────────────────
@@ -297,7 +298,10 @@ def run_pipeline(api_key: str):
     corrections = []
     final_proposal = ""
     approved = False
-    empresas_ctx = empresas_util.context_block()
+    # Perfil maestro (identidad y catálogo) + documentos legales de Empresas/.
+    empresas_ctx = "\n\n".join(
+        b for b in (perfil_util.block(), empresas_util.context_block()) if b
+    )
 
     for cycle in range(1, MAX_REVIEW_CYCLES + 1):
         session.current_cycle = cycle

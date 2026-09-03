@@ -26,7 +26,9 @@ import agents.researcher as researcher
 from config import MAX_TOKENS_WRITER, SCOUT_TOP_N
 from models.schemas import ProjectSession
 
-# Perfil organizacional base (complementado con Empresas/ en tiempo de ejecución)
+# OBSOLETO — no editar aquí. La fuente de verdad del perfil es
+# `perfil-map/PERFIL_MAP.md` (ver `utils/perfil.py`); esto queda solo como red de
+# seguridad para que el agente no corra sin contexto si el archivo no se encuentra.
 _ORG_PROFILE = """
 ORGANIZACIONES DISPONIBLES PARA PROPONER:
 
@@ -91,10 +93,15 @@ Respondes ÚNICAMENTE con el JSON pedido, sin texto adicional antes ni después.
 
 
 def _build_prompt(topic: str, evidence: str, n: int, empresas_context: str) -> str:
-    org_section = (
-        f"\n{empresas_context[:3000]}\n" if empresas_context
-        else _ORG_PROFILE
-    )
+    # El perfil maestro (perfil-map/PERFIL_MAP.md) manda: trae identidad, entidades,
+    # catálogo y diferenciadores actualizados a mano. Los documentos de Empresas/ lo
+    # COMPLEMENTAN con los datos legales verbatim (RUC, estatutos, CVs) en vez de
+    # sustituirlo — antes uno excluía al otro y, en cuanto había un solo documento en
+    # la carpeta, el perfil dejaba de llegar al prompt. `_ORG_PROFILE` queda como
+    # último recurso para que el agente nunca corra sin contexto institucional.
+    from utils import perfil as _perfil
+    partes = [p for p in (_perfil.block(), empresas_context[:3000] if empresas_context else "") if p]
+    org_section = "\n\n".join(partes) if partes else _ORG_PROFILE
     return f"""
 El usuario busca oportunidades de financiamiento no reembolsable para:
 "{topic}"

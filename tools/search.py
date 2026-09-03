@@ -410,6 +410,30 @@ def opportunity_queries_by_category(topic: str) -> dict:
             f"emprendimiento MIPYMES desarrollo empresarial Ecuador {t} fondos {year}",
             f"fortalecimiento organizaciones gremiales Ecuador {t} cooperacion internacional {year}",
         ],
+        # Los dominios oficiales de los financiadores publican las bases antes que
+        # cualquier agregador, y son la única fuente que el verificador de deadlines
+        # puede re-descargar para confirmar una fecha. Sin `site:`, la búsqueda abierta
+        # devolvía sobre todo notas de prensa y refritos que citan la convocatoria pero
+        # no sus bases.
+        "sitios_oficiales": [
+            f"site:iadb.org convocatoria call for proposals {t} Ecuador {year}",
+            f"site:caf.com convocatoria cooperación técnica {t} Ecuador {year}",
+            f"site:undp.org procurement call for proposals {t} Ecuador {year}",
+            f"site:worldbank.org call for proposals grant {t} Ecuador {year}",
+            f"site:international-partnerships.ec.europa.eu call for proposals {t} Ecuador {year}",
+            f"site:giz.de ausschreibung call {t} Ecuador {year}",
+            f"site:aecid.es convocatoria subvenciones {t} Ecuador {year}",
+            f"site:un.org call for proposals {t} Ecuador {year}",
+        ],
+        # Fuentes ecuatorianas: fondos y procesos que se publican solo en portales
+        # nacionales y que ninguna categoría internacional alcanza.
+        "ecuador_publico": [
+            f"site:compraspublicas.gob.ec consultoría {t} {year}",
+            f"SERCOP proceso consultoría {t} Ecuador {year} pliegos",
+            f"site:gob.ec convocatoria fondos concursables {t} {year}",
+            f"cooperación internacional Ecuador convocatoria {t} {year} organizaciones",
+            f"GAD municipal provincial Azuay Cuenca convocatoria {t} {year}",
+        ],
         "agregadores": [
             f"site:reliefweb.int call for proposals {t} Ecuador",
             f"site:devex.com {t} Ecuador funding opportunity {year}",
